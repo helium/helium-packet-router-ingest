@@ -16,7 +16,7 @@ enum Commands {
 #[derive(Default, Debug, Clone, clap::Args)]
 pub struct HttpConfig {
     /// Identity of the NS, unique to HTTP forwarder
-    #[arg(long, default_value = "TODO")]
+    #[arg(long, default_value = "6081FFFE12345678")]
     pub sender_nsid: String,
     /// How long were the packets held in ms
     #[arg(long, default_value = "1250")]
@@ -38,23 +38,28 @@ async fn main() {
     tracing::info!(?cli, "opts");
 
     match cli.command {
-        Commands::Serve(http_config) => server::run_http(http_config).await,
+        Commands::Serve(http_config) => server::run(http_config).await,
     }
 }
 
 mod server {
     use crate::{
-        deduplicator, grpc,
+        deduplicator, grpc, http,
         packet_info::{PacketHash, PacketMeta, RoutingInfo},
         HttpConfig, Result,
     };
-    use helium_proto::services::router::{EnvelopeDownV1, PacketRouterPacketUpV1};
-    use std::{collections::HashMap, time::Duration};
+    use helium_proto::services::router::{
+        envelope_down_v1, EnvelopeDownV1, PacketRouterPacketDownV1, PacketRouterPacketUpV1,
+    };
+    use hex::FromHex;
+    use std::{collections::HashMap, str::FromStr, time::Duration};
     use tokio::sync::mpsc::Sender;
     use tonic::Status;
 
     #[derive(Debug, Clone)]
     pub struct MsgSender(Sender<Msg>);
+
+    type GW = String;
 
     /// This message contains the entirety of the lifecycle of routing packets from hpr through http.
     ///
@@ -70,11 +75,13 @@ mod server {
     #[derive(Debug)]
     pub enum Msg {
         /// First contact with a gateway. Use the Sender for Downlinks.
-        GrpcConnect(Vec<u8>, Sender<Result<EnvelopeDownV1, Status>>),
+        GrpcConnect(GW, Sender<Result<EnvelopeDownV1, Status>>),
         /// A packet has been received
-        GrpcPacket(PacketRouterPacketUpV1),
+        GrpcUplink(PacketRouterPacketUpV1),
         /// A gateway stream has ended
-        GrpcDisconnect(Vec<u8>),
+        GrpcDisconnect(GW),
+        ///
+        HttpDownlink(GW, PacketRouterPacketDownV1),
         /// The DedupWindow has elapsed for a PacketHash.s
         DedupDone(PacketHash),
         /// The Cleanup window has elapsed for a PacketHash.
@@ -100,28 +107,33 @@ mod server {
         ) {
             self.0
                 .send(Msg::GrpcConnect(
-                    packet.gateway.to_ascii_lowercase(),
+                    packet.gateway_b58(),
                     downlink_sender.clone(),
                 ))
                 .await
                 .expect("gateway_connect");
         }
 
-        pub async fn gateway_disconnect(&self, gateway: Vec<u8>) {
+        pub async fn gateway_disconnect(&self, gateway: GW) {
             self.0
                 .send(Msg::GrpcDisconnect(gateway))
                 .await
                 .expect("gateway_disconnect");
         }
 
-        pub async fn packet(&self, packet: PacketRouterPacketUpV1) {
-            self.0.send(Msg::GrpcPacket(packet)).await.expect("packet");
+        pub async fn uplink(&self, packet: PacketRouterPacketUpV1) {
+            self.0.send(Msg::GrpcUplink(packet)).await.expect("uplink");
+        }
+
+        pub async fn downlink(&self, gw: GW, packet: PacketRouterPacketDownV1) {
+            self.0
+                .send(Msg::HttpDownlink(gw, packet))
+                .await
+                .expect("downlink");
         }
     }
 
-    pub async fn run_http(http_config: HttpConfig) {
-        console_subscriber::init();
-
+    pub async fn run(http_config: HttpConfig) {
         let (tx, mut rx) = tokio::sync::mpsc::channel(512);
 
         let mut deduplicator = deduplicator::Deduplicator::new(
@@ -151,18 +163,35 @@ mod server {
                             "gateway disconnect"
                         );
                     }
-                    Msg::GrpcPacket(packet) => {
+                    Msg::GrpcUplink(packet) => {
                         deduplicator.handle_packet(packet);
                     }
+                    Msg::HttpDownlink(gw, downlink) => match downlink_map.get(&gw) {
+                        Some(sender) => {
+                            let _ = sender
+                                .send(Ok(EnvelopeDownV1 {
+                                    data: Some(envelope_down_v1::Data::Packet(downlink)),
+                                }))
+                                .await;
+                            tracing::info!(gw, "downlink sent");
+                        }
+                        None => {
+                            tracing::warn!(?gw, ?downlink_map, "cannot downlink to unknown gateway")
+                        }
+                    },
                     Msg::DedupDone(hash) => {
                         let packets = deduplicator.get_packets(&hash);
                         tracing::info!(num_packets = packets.len(), "deduplication done");
                         match make_payload(packets, &http_config) {
                             Ok(body) => {
-                                println!(
-                                    "sending\n{}",
-                                    serde_json::to_string_pretty(&body).unwrap()
-                                );
+                                let local_chirpstack_url = "http://127.0.0.1:9005";
+                                let res = reqwest::Client::new()
+                                    .post(local_chirpstack_url)
+                                    // serde_json::to_string_pretty(&body).unwrap()
+                                    .body(serde_json::to_string(&body).expect("turning into json"))
+                                    .send()
+                                    .await;
+                                tracing::info!(?body, ?local_chirpstack_url, ?res, "uplink",);
                             }
                             Err(_) => {
                                 tracing::warn!("ignoring invalid packet");
@@ -176,9 +205,10 @@ mod server {
             }
         });
 
+        let http_thread = http::start(MsgSender(tx.clone()));
         let grpc_thread = grpc::start(MsgSender(tx.clone()));
 
-        let _ = tokio::try_join!(grpc_thread, reader_thread);
+        let _ = tokio::try_join!(grpc_thread, reader_thread, http_thread);
     }
 
     // #[instrument]
@@ -207,6 +237,7 @@ mod server {
 
         Ok(serde_json::json!({
             "ProtocolVersion" : "1.1",
+            "MessageType": "PRStartReq",
             "SenderNSID": config.sender_nsid,
             "DedupWindowSize": config.dedupe_window_size,
             "SenderID": config.helium_net_id,
@@ -218,48 +249,113 @@ mod server {
                 "ULFreq": packet.frequency_mhz(),
                 "RecvTime": packet.recv_time(),
                 "RFRegion": packet.region(),
-                "FNSULToken": make_token(),
+                "FNSULToken": make_token(packet.gateway_b58(), packet.timestamp),
                 "GWCnt": packets.len(),
                 "GWInfo": gw_info
             }
         }))
     }
 
-    fn make_token() -> String {
-        "TODO".to_string()
+    #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+    pub struct Token {
+        pub timestamp: u64,
+        pub gateway: GW,
+    }
+
+    impl TryFrom<String> for Token {
+        type Error = anyhow::Error;
+
+        fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
+            let s = hex::decode(value).unwrap();
+            Ok(serde_json::from_slice(&s[..]).unwrap())
+        }
+    }
+
+    impl FromStr for Token {
+        type Err = anyhow::Error;
+
+        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+            let s = hex::decode(s).unwrap();
+            Ok(serde_json::from_slice(&s[..]).unwrap())
+        }
+    }
+
+    impl FromHex for Token {
+        type Error = anyhow::Error;
+
+        fn from_hex<T: AsRef<[u8]>>(hex: T) -> std::result::Result<Self, Self::Error> {
+            let s = hex::decode(hex).unwrap();
+            Ok(serde_json::from_slice(&s[..]).unwrap())
+        }
+    }
+
+    fn make_token(gateway: GW, timestamp: u64) -> String {
+        let token = Token { gateway, timestamp };
+        hex::encode(serde_json::to_string(&token).unwrap())
     }
 }
 
 mod packet_info {
+    use helium_crypto::PublicKey;
     use helium_proto::services::router::PacketRouterPacketUpV1;
-    use lorawan::parser::{DataHeader, PhyPayload};
+    use lorawan::parser::{DataHeader, PhyPayload, EUI64};
 
     pub type PacketHash = String;
     type Eui = String;
 
+    #[derive(Debug, PartialEq)]
     pub enum RoutingInfo {
         Eui { app: Eui, dev: Eui },
         Devaddr(Eui),
         Unknown,
     }
+
+    impl RoutingInfo {
+        fn new_eui(app: EUI64<&[u8]>, dev: EUI64<&[u8]>) -> Self {
+            Self::Eui {
+                app: EUI64::new(flip_endianness(app.as_ref()))
+                    .unwrap()
+                    .to_string(),
+                dev: EUI64::new(flip_endianness(dev.as_ref()))
+                    .unwrap()
+                    .to_string(),
+            }
+        }
+    }
+
+    fn flip_endianness(slice: &[u8]) -> Vec<u8> {
+        let mut flipped = Vec::with_capacity(slice.len());
+
+        for &byte in slice.iter().rev() {
+            flipped.push(byte);
+        }
+
+        flipped
+    }
+
     pub trait PacketMeta {
         fn routing_info(&self) -> RoutingInfo;
         fn frequency_mhz(&self) -> f64;
         fn recv_time(&self) -> String;
         fn datarate_index(&self) -> u32;
-        // fn gateway_b58(&self) -> Result<String>;
+        fn gateway_b58(&self) -> String;
         fn gateway_mac_str(&self) -> String;
         // fn gateway_mac(&self) -> Result<semtech_udp::MacAddress>;
     }
 
     impl PacketMeta for PacketRouterPacketUpV1 {
+        fn gateway_b58(&self) -> String {
+            PublicKey::try_from(&self.gateway[..]).unwrap().to_string()
+        }
+
         fn routing_info(&self) -> RoutingInfo {
+            tracing::trace!(?self.payload, "payload");
             match lorawan::parser::parse(self.payload.clone()).expect("valid packet") {
                 PhyPayload::JoinAccept(_) => RoutingInfo::Unknown,
                 PhyPayload::JoinRequest(request) => {
-                    let app = request.app_eui().to_string();
-                    let dev = request.dev_eui().to_string();
-                    RoutingInfo::Eui { app, dev }
+                    let app = request.app_eui();
+                    let dev = request.dev_eui();
+                    RoutingInfo::new_eui(app, dev)
                 }
                 PhyPayload::Data(payload) => match payload {
                     lorawan::parser::DataPayload::Encrypted(phy) => {
@@ -274,8 +370,7 @@ mod packet_info {
         fn gateway_mac_str(&self) -> String {
             let hash = xxhash_rust::xxh64::xxh64(&self.gateway[1..], 0);
             let hash = hash.to_be_bytes();
-            let hash = hex::encode(hash);
-            hash
+            hex::encode(hash)
         }
 
         fn frequency_mhz(&self) -> f64 {
@@ -285,6 +380,13 @@ mod packet_info {
         }
 
         fn recv_time(&self) -> String {
+            // FIXME: This time should be when the NS received the packet, not the time the gw sent it.
+            // fn current_timestamp() -> u64 {
+            //     SystemTime::now()
+            //         .duration_since(UNIX_EPOCH)
+            //         .unwrap()
+            //         .as_millis() as u64
+            // }
             use chrono::{DateTime, NaiveDateTime, Utc};
 
             let dt = DateTime::<Utc>::from_utc(
@@ -323,6 +425,31 @@ mod packet_info {
                 DataRate::Lrfhss1bw1523 => 5,
                 DataRate::Lrfhss2bw1523 => 6,
                 DataRate::Fsk50 => todo!(),
+            }
+        }
+    }
+
+    mod test {
+        #![allow(unused_imports)]
+        use crate::packet_info::RoutingInfo;
+        use lorawan::parser::PhyPayload;
+
+        #[test]
+        fn eui_parse() {
+            let bytes = [
+                0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 196, 160, 173, 225, 146, 91,
+            ];
+
+            if let PhyPayload::JoinRequest(request) = lorawan::parser::parse(bytes).unwrap() {
+                assert_eq!(
+                    RoutingInfo::Eui {
+                        app: "0000000000000000".to_string(),
+                        dev: "0000000000000003".to_string()
+                    },
+                    RoutingInfo::new_eui(request.app_eui(), request.dev_eui())
+                );
+            } else {
+                assert!(false);
             }
         }
     }
@@ -396,8 +523,305 @@ mod deduplicator {
     }
 }
 
+mod http {
+    use std::collections::HashMap;
+
+    use crate::server::{MsgSender, Token};
+    use axum::{
+        body::Bytes,
+        extract,
+        response::IntoResponse,
+        routing::{get, post, Router},
+        Extension,
+    };
+    use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
+    use reqwest::StatusCode;
+    use tracing::instrument;
+
+    #[instrument]
+    pub fn start(sender: MsgSender) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let app = Router::new()
+                .route("/api/downlink", post(downlink_post))
+                .route("/*key", post(catchall_post))
+                .route("/", post(catchall_post))
+                .route(
+                    "/health",
+                    get(|| async {
+                        tracing::info!("health check");
+                        "ok"
+                    }),
+                )
+                .layer(Extension(sender));
+
+            let addr = "0.0.0.0:9002".parse().expect("valid serve addr");
+            tracing::info!(addr = "0.0.0.0:9002", "setup");
+            axum::Server::bind(&addr)
+                .serve(app.into_make_service())
+                .await
+                .expect("serve http");
+        })
+    }
+
+    async fn catchall_post(_sender: Extension<MsgSender>, body: Bytes) -> impl IntoResponse {
+        tracing::info!(?body, "catch all request");
+    }
+
+    async fn downlink_post(
+        sender: Extension<MsgSender>,
+        extract::Json(downlink): extract::Json<serde_json::Value>,
+    ) -> impl IntoResponse {
+        tracing::info!(?downlink, "http downlink");
+        let downlink: PRStartAns = serde_json::from_value(downlink).unwrap();
+        let gateway = downlink.dl_meta_data.fns_ul_token.gateway.clone();
+        let packet_down = downlink.into();
+        sender.downlink(gateway, packet_down).await;
+        (StatusCode::ACCEPTED, "Downlink Accepted")
+    }
+
+    #[allow(unused)]
+    #[derive(Debug, serde::Deserialize)]
+    struct XmitDataReq {
+        #[serde(rename = "ProtocolVersion")]
+        protocol_version: String,
+        #[serde(rename = "SenderID")]
+        sender_id: String,
+        #[serde(rename = "ReceiverID")]
+        receiver_id: String,
+        #[serde(rename = "SenderNSID")]
+        sender_nsid: String,
+        #[serde(rename = "ReceiverNSID")]
+        receiver_nsid: String,
+        #[serde(rename = "TransactionID")]
+        transaction_id: usize,
+        #[serde(rename = "MessageType")]
+        message_type: String,
+        #[serde(rename = "PHYPayload")]
+        phy_payload: String,
+        #[serde(rename = "DLMetaData")]
+        dl_meta_data: DLMetaData,
+    }
+
+    #[allow(unused)]
+    #[derive(Debug, serde::Deserialize)]
+    struct DLMetaData {
+        #[serde(rename = "DevEUI")]
+        dev_eui: String,
+        #[serde(rename = "DLFreq1")]
+        dl_freq_1: f32,
+        #[serde(rename = "DataRate1")]
+        data_rate_1: u8,
+        #[serde(rename = "RXDelay1")]
+        rx_delay_1: u8,
+        #[serde(rename = "FNSULToken", with = "hex::serde")]
+        fns_ul_token: Token,
+        #[serde(rename = "ClassMode")]
+        class_mode: String,
+        #[serde(rename = "HiPriorityFlag")]
+        high_priority: bool,
+        #[serde(rename = "GWInfo")]
+        gw_info: Vec<GWInfo>,
+    }
+
+    #[allow(unused)]
+    #[derive(Debug, serde::Deserialize)]
+    struct GWInfo {
+        #[serde(rename = "ULToken")]
+        ul_token: String,
+    }
+
+    impl From<XmitDataReq> for PacketRouterPacketDownV1 {
+        fn from(value: XmitDataReq) -> Self {
+            let freq = value.dl_meta_data.dl_freq_1;
+            let freq = (freq * 1_000_000.0) as u32; // mHz -> Hz
+            Self {
+                payload: value.phy_payload.into(),
+                rx1: Some(WindowV1 {
+                    timestamp: 1,
+                    datarate: value.dl_meta_data.data_rate_1.into(),
+                    frequency: freq,
+                    immediate: false,
+                }),
+                rx2: None,
+            }
+        }
+    }
+
+    #[allow(unused)]
+    #[derive(Debug, serde::Deserialize)]
+    struct PRStartAns {
+        #[serde(rename = "ProtocolVersion")]
+        protocol_version: String,
+        #[serde(rename = "SenderID")]
+        sender_id: String,
+        #[serde(rename = "ReceiverID")]
+        receiver_id: String,
+        #[serde(rename = "TransactionID")]
+        transaction_id: u64,
+        #[serde(rename = "MessageType")]
+        message_type: String,
+        #[serde(rename = "Result")]
+        result: PRStartAnsResult,
+        #[serde(rename = "PHYPayload")]
+        phy_payload: String,
+        #[serde(rename = "DevEUI")]
+        dev_eui: String,
+        #[serde(rename = "FCntUp")]
+        f_cnt_up: u32,
+        #[serde(rename = "DLMetaData")]
+        dl_meta_data: PRStartAnsDLMetaData,
+        #[serde(rename = "DevAddr")]
+        dev_addr: String,
+    }
+
+    #[allow(unused)]
+    #[derive(Debug, serde::Deserialize)]
+    struct PRStartAnsResult {
+        #[serde(rename = "ResultCode")]
+        result_code: String,
+    }
+
+    #[allow(unused)]
+    #[derive(Debug, serde::Deserialize)]
+    struct PRStartAnsDLMetaData {
+        #[serde(rename = "DevEUI")]
+        dev_eui: String,
+        #[serde(rename = "FPort")]
+        f_port: Option<String>,
+        #[serde(rename = "FCntDown")]
+        f_cnt_down: Option<String>,
+        #[serde(rename = "Confirmed")]
+        confirmed: bool,
+        #[serde(rename = "DLFreq1")]
+        dl_freq_1: f32,
+        #[serde(rename = "DLFreq2")]
+        dl_freq_2: f32,
+        #[serde(rename = "RXDelay1")]
+        rx_delay_1: u8,
+        #[serde(rename = "ClassMode")]
+        class_mode: String,
+        #[serde(rename = "DataRate1")]
+        data_rate_1: u8,
+        #[serde(rename = "DataRate2")]
+        data_rate_2: u8,
+        #[serde(rename = "FNSULToken", with = "hex::serde")]
+        fns_ul_token: Token,
+        #[serde(rename = "GWInfo")]
+        gw_info: Vec<HashMap<String, Option<String>>>,
+        #[serde(rename = "HiPriorityFlag")]
+        hi_priority_flag: bool,
+    }
+
+    impl From<PRStartAns> for PacketRouterPacketDownV1 {
+        fn from(value: PRStartAns) -> Self {
+            let freq1 = value.dl_meta_data.dl_freq_1;
+            let freq1 = (freq1 * 1_000_000.0) as u32; // mHz -> Hz
+
+            let freq2 = value.dl_meta_data.dl_freq_2;
+            let freq2 = (freq2 * 1_000_000.0) as u32; // mHz -> Hz
+            Self {
+                payload: value.phy_payload.into(),
+                rx1: Some(WindowV1 {
+                    timestamp: ((value.dl_meta_data.fns_ul_token.timestamp + 5_000_000) as u32)
+                        as u64,
+                    datarate: value.dl_meta_data.data_rate_1.into(),
+                    frequency: freq1,
+                    immediate: false,
+                }),
+                rx2: Some(WindowV1 {
+                    timestamp: ((value.dl_meta_data.fns_ul_token.timestamp + 6_000_000) as u32)
+                        as u64,
+                    datarate: value.dl_meta_data.data_rate_2.into(),
+                    frequency: freq2,
+                    immediate: false,
+                }),
+            }
+        }
+    }
+
+    mod test {
+        #[allow(unused)]
+        use crate::http::{PRStartAns, XmitDataReq};
+        #[allow(unused)]
+        use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
+
+        #[test]
+        fn xmit_data_req_to_packet_down_v1() {
+            let value = serde_json::json!({
+                "ProtocolVersion": "1.1",
+                "SenderID": "000042",
+                "ReceiverID": "0xC00053",
+                "SenderNSID": "downlink-test-body-sender-nsid",
+                "ReceiverNSID": "receiver-nsid",
+                "TransactionID": 12348675,
+                "MessageType": "XmitDataReq",
+                "PHYPayload": "this-is-a-payload",
+                "DLMetaData": {
+                    "DevEUI": "0xaabbffccfeeff001",
+                    "DLFreq1": 904.3,
+                    "DataRate1": 0,
+                    "RXDelay1": 1,
+                    "FNSULToken": "7b2274696d657374616d70223a343034383533323435322c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d",
+                    "GWInfo": [
+                        {"ULToken": "another-token"}
+                    ],
+                    "ClassMode": "A",
+                    "HiPriorityFlag": false
+                }
+            });
+            let packet: XmitDataReq = serde_json::from_value(value).unwrap();
+            println!("packet: {packet:#?}");
+            let down: PacketRouterPacketDownV1 = packet.into();
+            println!("down: {down:#?}");
+        }
+
+        #[test]
+        fn join_accept_to_packet_down_v1() {
+            let value = serde_json::json!( {
+                "ProtocolVersion": "1.1",
+                "SenderID": "000024",
+                "ReceiverID": "c00053",
+                "TransactionID":  193858937,
+                "MessageType": "PRStartAns",
+                "Result": {"ResultCode": "Success"},
+                "PHYPayload": "209c7848d681b589da4b8e5544460a693383bb7e5d47b849ef0d290bafb20872ae",
+                "DevEUI": "0000000000000003",
+                "Lifetime": null,
+                "FNwkSIntKey": null,
+                "NwkSKey": {
+                    "KEKLabel": "",
+                    "AESKey": "0e2baf26327308e63afe62be15edea6a"
+                },
+                "FCntUp": 0,
+                "ServiceProfile": null,
+                "DLMetaData": {
+                    "DevEUI": "0000000000000003",
+                    "FPort": null,
+                    "FCntDown": null,
+                    "Confirmed": false,
+                    "DLFreq1": 925.1,
+                    "DLFreq2": 923.3,
+                    "RXDelay1": 5,
+                    "ClassMode": "A",
+                    "DataRate1": 10,
+                    "DataRate2": 8,
+                    "FNSULToken": "7b2274696d657374616d70223a343034383533323435322c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d",
+                    "GWInfo": [{"FineRecvTime": null,"RSSI": null,"SNR": null,"Lat": null,"Lon": null,"DLAllowed": null}],
+                  "HiPriorityFlag": false
+                },
+                "DevAddr": "48000037"
+            });
+            let packet: PRStartAns = serde_json::from_value(value).expect("to packet down");
+            println!("packet: {packet:#?}");
+            let down: PacketRouterPacketDownV1 = packet.into();
+            println!("down: {down:#?}");
+        }
+    }
+}
+
 mod grpc {
 
+    use crate::packet_info::PacketMeta;
     use crate::server::MsgSender;
     use helium_proto::services::router::{
         envelope_up_v1, packet_server::Packet, packet_server::PacketServer, EnvelopeDownV1,
@@ -454,9 +878,9 @@ mod grpc {
                             sender
                                 .gateway_connect(&packet, downlink_sender.clone())
                                 .await;
-                            gateway = Some(packet.gateway.clone())
+                            gateway = Some(packet.gateway_b58())
                         }
-                        sender.packet(packet).await;
+                        sender.uplink(packet).await;
                     } else {
                         tracing::warn!(?msg.data, "ignoring message");
                     }
