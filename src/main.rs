@@ -35,6 +35,9 @@ pub struct HttpConfig {
     /// Chirpstack does nothing with the notif message and returns an 400.
     #[arg(long, default_value = "false")]
     pub send_pr_start_notif: bool,
+    /// LNS Endpoint
+    #[arg(long, default_value = "http://localhost:9005")]
+    pub lns_endpoint: String,
 }
 
 #[tokio::main]
@@ -57,7 +60,7 @@ mod server {
         HttpConfig, Result,
     };
     use helium_proto::services::router::{
-        envelope_down_v1, EnvelopeDownV1, PacketRouterPacketUpV1,
+        envelope_down_v1, EnvelopeDownV1, PacketRouterPacketDownV1, PacketRouterPacketUpV1,
     };
     use hex::FromHex;
     use std::{collections::HashMap, str::FromStr, time::Duration};
@@ -65,7 +68,21 @@ mod server {
     use tonic::Status;
 
     #[derive(Debug, Clone)]
-    pub struct MsgSender(Sender<Msg>);
+    pub struct MsgSender(pub Sender<Msg>);
+
+    #[derive(Debug)]
+    pub struct DownlinkSender(pub Sender<Result<EnvelopeDownV1, Status>>);
+
+    impl DownlinkSender {
+        pub async fn send_downlink(&self, downlink: PacketRouterPacketDownV1) {
+            let _ = self
+                .0
+                .send(Ok(EnvelopeDownV1 {
+                    data: Some(envelope_down_v1::Data::Packet(downlink)),
+                }))
+                .await;
+        }
+    }
 
     type GW = String;
     type TransactionID = u64;
@@ -84,7 +101,7 @@ mod server {
     #[derive(Debug)]
     pub enum Msg {
         /// First contact with a gateway. Use the Sender for Downlinks.
-        GrpcConnect(GW, Sender<Result<EnvelopeDownV1, Status>>),
+        GrpcConnect(GW, DownlinkSender),
         /// A packet has been received
         GrpcUplink(PacketRouterPacketUpV1),
         /// A gateway stream has ended
@@ -98,6 +115,8 @@ mod server {
         HttpNotif(TransactionID),
         /// Downlink has been sent to the gateway, Notify the Roamer
         HttpXmitAns(XmitDataReq),
+        /// All HTTP sends go through here
+        HttpSend(String),
         /// The DedupWindow has elapsed for a PacketHash.
         /// Send the packet
         DedupDone(PacketHash),
@@ -120,13 +139,10 @@ mod server {
         pub async fn gateway_connect(
             &self,
             packet: &PacketRouterPacketUpV1,
-            downlink_sender: Sender<Result<EnvelopeDownV1, Status>>,
+            downlink_sender: DownlinkSender,
         ) {
             self.0
-                .send(Msg::GrpcConnect(
-                    packet.gateway_b58(),
-                    downlink_sender.clone(),
-                ))
+                .send(Msg::GrpcConnect(packet.gateway_b58(), downlink_sender))
                 .await
                 .expect("gateway_connect");
         }
@@ -169,6 +185,10 @@ mod server {
                 .await
                 .expect("xmit_ans");
         }
+
+        pub async fn http_send(&self, body: String) {
+            self.0.send(Msg::HttpSend(body)).await.expect("http send");
+        }
     }
 
     pub async fn run(http_config: HttpConfig) {
@@ -184,23 +204,16 @@ mod server {
         let reader_thread = tokio::spawn(async move {
             let mut downlink_map = HashMap::new();
             tracing::info!("reading thread started");
+            let client = reqwest::Client::new();
             while let Some(msg) = rx.recv().await {
                 match msg {
                     Msg::GrpcConnect(gw, chan) => {
-                        let inserted = downlink_map.insert(gw, chan);
-                        tracing::info!(
-                            inserted = inserted.is_none(),
-                            size = downlink_map.len(),
-                            "gateway connect"
-                        );
+                        let _prev_val = downlink_map.insert(gw, chan);
+                        tracing::info!(size = downlink_map.len(), "gateway connect");
                     }
                     Msg::GrpcDisconnect(gw) => {
-                        let removed = downlink_map.remove(&gw);
-                        tracing::info!(
-                            removed = removed.is_some(),
-                            size = downlink_map.len(),
-                            "gateway disconnect"
-                        );
+                        let _prev_val = downlink_map.remove(&gw);
+                        tracing::info!(size = downlink_map.len(), "gateway disconnect");
                     }
                     Msg::GrpcUplink(packet) => {
                         deduplicator.handle_packet(packet);
@@ -210,12 +223,7 @@ mod server {
                         let transaction_id = pr_start.transaction_id;
                         match downlink_map.get(&gw) {
                             Some(sender) => {
-                                let downlink = pr_start.into();
-                                let _ = sender
-                                    .send(Ok(EnvelopeDownV1 {
-                                        data: Some(envelope_down_v1::Data::Packet(downlink)),
-                                    }))
-                                    .await;
+                                sender.send_downlink(pr_start.into()).await;
                                 tracing::info!(gw, "downlink sent");
                                 if http_config.send_pr_start_notif {
                                     let _ = reader_tx.pr_notif(transaction_id).await;
@@ -228,12 +236,7 @@ mod server {
                         let gw = xmit_req.dl_meta_data.fns_ul_token.gateway.clone();
                         match downlink_map.get(&gw) {
                             Some(sender) => {
-                                let downlink = xmit_req.clone().into();
-                                let _ = sender
-                                    .send(Ok(EnvelopeDownV1 {
-                                        data: Some(envelope_down_v1::Data::Packet(downlink)),
-                                    }))
-                                    .await;
+                                sender.send_downlink(xmit_req.clone().into()).await;
                                 tracing::info!(gw, "downlink sent");
                                 let _ = reader_tx.xmit_ans(xmit_req).await;
                             }
@@ -241,57 +244,29 @@ mod server {
                         }
                     }
                     Msg::HttpNotif(transaction_id) => {
-                        let local_chirpstack_url = "http://127.0.0.1:9005";
-                        let body = serde_json::json!({
-                            "ProtocolVersion": "1.1",
-                            "SenderID": http_config.helium_net_id,
-                            "ReceiverID": http_config.target_net_id,
-                            "TransactionID": transaction_id,
-                            "MessageType": "PRStartNotif",
-                            "SenderNSID": http_config.sender_nsid,
-                            "ReceiverNSID": http_config.receiver_nsid,
-                            "Result": {"ResultCode": "Success"}
-                        });
-                        let res = reqwest::Client::new()
-                            .post(local_chirpstack_url)
-                            .body(serde_json::to_string(&body).expect("turning into json"))
-                            .send()
-                            .await;
-                        tracing::info!(?body, local_chirpstack_url, ?res, "pr notif");
+                        let body = make_pr_start_notif(transaction_id, &http_config);
+                        reader_tx.http_send(body).await;
+                        tracing::debug!("http notif");
                     }
                     Msg::HttpXmitAns(xmit_req) => {
-                        let local_chirpstack_url = "http://127.0.0.1:9005";
-                        let body = serde_json::json!({
-                            "ProtocolVersion": "1.1",
-                            "MessageType": "XmitDataAns",
-                            "SenderID": http_config.helium_net_id,
-                            "ReceiverID": http_config.target_net_id,
-                            "SenderNSID": http_config.sender_nsid,
-                            "ReceiverNSID": http_config.receiver_nsid,
-                            "TransactionID": xmit_req.transaction_id,
-                            "Result": {"ResultCode": "Success"},
-                            "DLFreq1": xmit_req.dl_meta_data.dl_freq_1
-                        });
-                        let res = reqwest::Client::new()
-                            .post(local_chirpstack_url)
-                            .body(serde_json::to_string(&body).expect("turning into json"))
+                        let body = make_xmit_data_ans(&xmit_req, &http_config);
+                        reader_tx.http_send(body).await;
+                        tracing::debug!("http xmit ans");
+                    }
+                    Msg::HttpSend(body) => {
+                        let res = client
+                            .post(&http_config.lns_endpoint)
+                            .body(body.clone())
                             .send()
                             .await;
-                        tracing::info!(?body, local_chirpstack_url, ?res, "xmit ans");
+                        tracing::debug!(?body, ?res, "http send");
                     }
                     Msg::DedupDone(hash) => {
                         let packets = deduplicator.get_packets(&hash);
                         tracing::info!(num_packets = packets.len(), "deduplication done");
                         match make_payload(packets, &http_config) {
                             Ok(body) => {
-                                let local_chirpstack_url = "http://127.0.0.1:9005";
-                                let res = reqwest::Client::new()
-                                    .post(local_chirpstack_url)
-                                    // serde_json::to_string_pretty(&body).unwrap()
-                                    .body(serde_json::to_string(&body).expect("turning into json"))
-                                    .send()
-                                    .await;
-                                tracing::info!(?body, ?local_chirpstack_url, ?res, "uplink",);
+                                reader_tx.http_send(body).await;
                             }
                             Err(_) => {
                                 tracing::warn!("ignoring invalid packet");
@@ -311,11 +286,37 @@ mod server {
         let _ = tokio::try_join!(grpc_thread, reader_thread, http_thread);
     }
 
+    fn make_pr_start_notif(transaction_id: TransactionID, http_config: &HttpConfig) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "ProtocolVersion": "1.1",
+            "SenderID": http_config.helium_net_id,
+            "ReceiverID": http_config.target_net_id,
+            "TransactionID": transaction_id,
+            "MessageType": "PRStartNotif",
+            "SenderNSID": http_config.sender_nsid,
+            "ReceiverNSID": http_config.receiver_nsid,
+            "Result": {"ResultCode": "Success"}
+        }))
+        .expect("pr_start_notif json")
+    }
+
+    fn make_xmit_data_ans(xmit: &XmitDataReq, http_config: &HttpConfig) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "ProtocolVersion": "1.1",
+            "MessageType": "XmitDataAns",
+            "SenderID": http_config.helium_net_id,
+            "ReceiverID": http_config.target_net_id,
+            "SenderNSID": http_config.sender_nsid,
+            "ReceiverNSID": http_config.receiver_nsid,
+            "TransactionID": xmit.transaction_id,
+            "Result": {"ResultCode": "Success"},
+            "DLFreq1": xmit.dl_meta_data.dl_freq_1
+        }))
+        .expect("xmit_data_ans json")
+    }
+
     // #[instrument]
-    fn make_payload(
-        packets: Vec<PacketRouterPacketUpV1>,
-        config: &HttpConfig,
-    ) -> Result<serde_json::Value> {
+    fn make_payload(packets: Vec<PacketRouterPacketUpV1>, config: &HttpConfig) -> Result<String> {
         let packet = packets.first().expect("at least one packet");
 
         let (routing_key, routing_value) = match packet.routing_info() {
@@ -335,7 +336,7 @@ mod server {
             }));
         }
 
-        Ok(serde_json::json!({
+        Ok(serde_json::to_string(&serde_json::json!({
             "ProtocolVersion" : "1.1",
             "MessageType": "PRStartReq",
             "SenderNSID": config.sender_nsid,
@@ -355,6 +356,7 @@ mod server {
                 "GWInfo": gw_info
             }
         }))
+        .expect("pr_start_req json"))
     }
 
     #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
@@ -972,8 +974,8 @@ mod http {
 
 mod grpc {
 
-    use crate::packet_info::PacketMeta;
     use crate::server::MsgSender;
+    use crate::{packet_info::PacketMeta, server::DownlinkSender};
     use helium_proto::services::router::{
         envelope_up_v1, packet_server::Packet, packet_server::PacketServer, EnvelopeDownV1,
         EnvelopeUpV1,
@@ -1027,7 +1029,7 @@ mod grpc {
                     if let Some(envelope_up_v1::Data::Packet(packet)) = msg.data {
                         if gateway.is_none() {
                             sender
-                                .gateway_connect(&packet, downlink_sender.clone())
+                                .gateway_connect(&packet, DownlinkSender(downlink_sender.clone()))
                                 .await;
                             gateway = Some(packet.gateway_b58())
                         }
