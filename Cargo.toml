@@ -1,0 +1,29 @@
+[package]
+name = "hpr-http-rs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.71"
+clap = { version = "4.3.11", features = ["derive"] }
+console-subscriber = "0.1.10"
+helium-crypto = "0.7.0"
+rand = "0.8.5"
+reqwest = { version = "0.11.18", features = ["json"] }
+serde = { version = "1.0.167", features = ["derive"] }
+serde_json = "1.0.100"
+tonic = "0.9.2"
+tracing = "0.1.37"
+tracing-subscriber = "0.3.17"
+helium-proto = { git = "https://github.com/helium/proto", branch="master", features=["services"]}
+axum = "0.6.18"
+config = "0.13.3"
+tokio = { version = "1.29.1", features = ["rt-multi-thread"] }
+tokio-stream = "0.1.14"
+sha2 = "0.10.7"
+hex = "0.4.3"
+lorawan = "0.7.3"
+chrono = "0.4.26"
+xxhash-rust = { version = "0.8.6", features = ["xxh64"] }
