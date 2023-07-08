@@ -51,12 +51,13 @@ async fn main() {
 
 mod server {
     use crate::{
-        deduplicator, grpc, http,
+        deduplicator, grpc,
+        http::{self, PRStartAnsDownlink, XmitDataReq},
         packet_info::{PacketHash, PacketMeta, RoutingInfo},
         HttpConfig, Result,
     };
     use helium_proto::services::router::{
-        envelope_down_v1, EnvelopeDownV1, PacketRouterPacketDownV1, PacketRouterPacketUpV1,
+        envelope_down_v1, EnvelopeDownV1, PacketRouterPacketUpV1,
     };
     use hex::FromHex;
     use std::{collections::HashMap, str::FromStr, time::Duration};
@@ -88,11 +89,15 @@ mod server {
         GrpcUplink(PacketRouterPacketUpV1),
         /// A gateway stream has ended
         GrpcDisconnect(GW),
-        /// A Downlink has been received over HTTP.
+        /// A JoinAccept Downlink has been received over HTTP.
         /// Find the GW to forward it to.
-        HttpDownlink(GW, PacketRouterPacketDownV1, TransactionID),
-        /// Downlink has been sent to the gateway, Notify the Roamer
+        HttpPRStartAnsDownlink(PRStartAnsDownlink),
+        /// A Downlink has been received over HTTP
+        HttpXmitDataReqDownlink(XmitDataReq),
+        /// Join Accept Downlink has been sent to the gateway, Notify the Roamer
         HttpNotif(TransactionID),
+        /// Downlink has been sent to the gateway, Notify the Roamer
+        HttpXmitAns(XmitDataReq),
         /// The DedupWindow has elapsed for a PacketHash.
         /// Send the packet
         DedupDone(PacketHash),
@@ -137,16 +142,18 @@ mod server {
             self.0.send(Msg::GrpcUplink(packet)).await.expect("uplink");
         }
 
-        pub async fn downlink(
-            &self,
-            gw: GW,
-            packet: PacketRouterPacketDownV1,
-            transaction_id: TransactionID,
-        ) {
+        pub async fn join_accept_downlink(&self, pr_start_ans: PRStartAnsDownlink) {
             self.0
-                .send(Msg::HttpDownlink(gw, packet, transaction_id))
+                .send(Msg::HttpPRStartAnsDownlink(pr_start_ans))
                 .await
-                .expect("downlink");
+                .expect("join accept downlink");
+        }
+
+        pub async fn data_downlink(&self, xmit_req: XmitDataReq) {
+            self.0
+                .send(Msg::HttpXmitDataReqDownlink(xmit_req))
+                .await
+                .expect("data downlink");
         }
 
         pub async fn pr_notif(&self, transaction_id: TransactionID) {
@@ -154,6 +161,13 @@ mod server {
                 .send(Msg::HttpNotif(transaction_id))
                 .await
                 .expect("pr_notif");
+        }
+
+        pub async fn xmit_ans(&self, xmit_req: XmitDataReq) {
+            self.0
+                .send(Msg::HttpXmitAns(xmit_req))
+                .await
+                .expect("xmit_ans");
         }
     }
 
@@ -191,9 +205,12 @@ mod server {
                     Msg::GrpcUplink(packet) => {
                         deduplicator.handle_packet(packet);
                     }
-                    Msg::HttpDownlink(gw, downlink, transaction_id) => {
+                    Msg::HttpPRStartAnsDownlink(pr_start) => {
+                        let gw = pr_start.dl_meta_data.fns_ul_token.gateway.clone();
+                        let transaction_id = pr_start.transaction_id;
                         match downlink_map.get(&gw) {
                             Some(sender) => {
+                                let downlink = pr_start.into();
                                 let _ = sender
                                     .send(Ok(EnvelopeDownV1 {
                                         data: Some(envelope_down_v1::Data::Packet(downlink)),
@@ -204,13 +221,23 @@ mod server {
                                     let _ = reader_tx.pr_notif(transaction_id).await;
                                 }
                             }
-                            None => {
-                                tracing::warn!(
-                                    ?gw,
-                                    ?downlink_map,
-                                    "cannot downlink to unknown gateway"
-                                )
+                            None => tracing::warn!(?gw, "join accept for unknown gateway"),
+                        }
+                    }
+                    Msg::HttpXmitDataReqDownlink(xmit_req) => {
+                        let gw = xmit_req.dl_meta_data.fns_ul_token.gateway.clone();
+                        match downlink_map.get(&gw) {
+                            Some(sender) => {
+                                let downlink = xmit_req.clone().into();
+                                let _ = sender
+                                    .send(Ok(EnvelopeDownV1 {
+                                        data: Some(envelope_down_v1::Data::Packet(downlink)),
+                                    }))
+                                    .await;
+                                tracing::info!(gw, "downlink sent");
+                                let _ = reader_tx.xmit_ans(xmit_req).await;
                             }
+                            None => tracing::warn!(?gw, "join accept for unknown gateway"),
                         }
                     }
                     Msg::HttpNotif(transaction_id) => {
@@ -231,6 +258,26 @@ mod server {
                             .send()
                             .await;
                         tracing::info!(?body, local_chirpstack_url, ?res, "pr notif");
+                    }
+                    Msg::HttpXmitAns(xmit_req) => {
+                        let local_chirpstack_url = "http://127.0.0.1:9005";
+                        let body = serde_json::json!({
+                            "ProtocolVersion": "1.1",
+                            "MessageType": "XmitDataAns",
+                            "SenderID": http_config.helium_net_id,
+                            "ReceiverID": http_config.target_net_id,
+                            "SenderNSID": http_config.sender_nsid,
+                            "ReceiverNSID": http_config.receiver_nsid,
+                            "TransactionID": xmit_req.transaction_id,
+                            "Result": {"ResultCode": "Success"},
+                            "DLFreq1": xmit_req.dl_meta_data.dl_freq_1
+                        });
+                        let res = reqwest::Client::new()
+                            .post(local_chirpstack_url)
+                            .body(serde_json::to_string(&body).expect("turning into json"))
+                            .send()
+                            .await;
+                        tracing::info!(?body, local_chirpstack_url, ?res, "xmit ans");
                     }
                     Msg::DedupDone(hash) => {
                         let packets = deduplicator.get_packets(&hash);
@@ -626,72 +673,90 @@ mod http {
         extract::Json(downlink): extract::Json<serde_json::Value>,
     ) -> impl IntoResponse {
         tracing::info!(?downlink, "http downlink");
-        let pr_start: PRStartAns = serde_json::from_value(downlink).unwrap();
-        let gateway = pr_start.dl_meta_data.fns_ul_token.gateway.clone();
-        let packet_down = pr_start.clone().into();
-        sender
-            .downlink(gateway, packet_down, pr_start.transaction_id)
-            .await;
-        (StatusCode::ACCEPTED, "Downlink Accepted")
+        match serde_json::from_value::<PRStartAnsDownlink>(downlink.clone()) {
+            Ok(pr_start) => {
+                sender.join_accept_downlink(pr_start).await;
+                (StatusCode::ACCEPTED, "Downlink Accepted")
+            }
+            Err(_) => match serde_json::from_value::<PRStartAnsPlain>(downlink.clone()) {
+                Ok(_plain) => (StatusCode::ACCEPTED, "Answer Accepted"),
+                Err(_) => match serde_json::from_value::<XmitDataReq>(downlink) {
+                    Ok(xmit) => {
+                        sender.data_downlink(xmit).await;
+                        (StatusCode::ACCEPTED, "Xmit Accepted")
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            "could not make pr_start_ans or xmit_data_req from downlink"
+                        );
+                        (StatusCode::BAD_REQUEST, "unknown")
+                    }
+                },
+            },
+        }
     }
 
-    #[allow(unused)]
-    #[derive(Debug, serde::Deserialize)]
-    struct XmitDataReq {
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub struct XmitDataReq {
         #[serde(rename = "ProtocolVersion")]
-        protocol_version: String,
+        pub protocol_version: String,
         #[serde(rename = "SenderID")]
-        sender_id: String,
+        pub sender_id: String,
         #[serde(rename = "ReceiverID")]
-        receiver_id: String,
-        #[serde(rename = "ReceiverNSID")]
-        receiver_nsid: String,
+        pub receiver_id: String,
         #[serde(rename = "TransactionID")]
-        transaction_id: usize,
+        pub transaction_id: u64,
         #[serde(rename = "MessageType")]
-        message_type: String,
+        pub message_type: String,
         #[serde(rename = "PHYPayload")]
-        phy_payload: String,
+        pub phy_payload: String,
         #[serde(rename = "DLMetaData")]
-        dl_meta_data: DLMetaData,
+        pub dl_meta_data: DLMetaData,
     }
 
-    #[allow(unused)]
-    #[derive(Debug, serde::Deserialize)]
-    struct DLMetaData {
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub struct DLMetaData {
         #[serde(rename = "DevEUI")]
-        dev_eui: String,
+        pub dev_eui: String,
         #[serde(rename = "DLFreq1")]
-        dl_freq_1: f32,
+        pub dl_freq_1: f32,
         #[serde(rename = "DataRate1")]
-        data_rate_1: u8,
+        pub data_rate_1: u8,
         #[serde(rename = "RXDelay1")]
-        rx_delay_1: u8,
+        pub rx_delay_1: u8,
         #[serde(rename = "FNSULToken", with = "hex::serde")]
-        fns_ul_token: Token,
+        pub fns_ul_token: Token,
         #[serde(rename = "ClassMode")]
-        class_mode: String,
+        pub class_mode: String,
         #[serde(rename = "HiPriorityFlag")]
-        high_priority: bool,
+        pub high_priority: bool,
         #[serde(rename = "GWInfo")]
-        gw_info: Vec<GWInfo>,
+        pub gw_info: Vec<GWInfo>,
     }
 
-    #[allow(unused)]
-    #[derive(Debug, serde::Deserialize)]
-    struct GWInfo {
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub struct GWInfo {
         #[serde(rename = "ULToken")]
-        ul_token: String,
+        pub ul_token: Option<String>,
     }
 
     impl From<XmitDataReq> for PacketRouterPacketDownV1 {
         fn from(value: XmitDataReq) -> Self {
             let freq = value.dl_meta_data.dl_freq_1;
             let freq = (freq * 1_000_000.0) as u32; // mHz -> Hz
+            let payload =
+                hex::decode(value.phy_payload.clone()).expect("hex decode downlink payload");
+            tracing::info!(
+                before = ?value.phy_payload,
+                after = ?payload,
+                "to packet down"
+            );
             Self {
-                payload: value.phy_payload.into(),
+                payload,
                 rx1: Some(WindowV1 {
-                    timestamp: 1,
+                    timestamp: ((value.dl_meta_data.fns_ul_token.timestamp
+                        + (value.dl_meta_data.rx_delay_1 as u64 * 1_000_000))
+                        as u32) as u64,
                     datarate: value.dl_meta_data.data_rate_1.into(),
                     frequency: freq,
                     immediate: false,
@@ -701,9 +766,24 @@ mod http {
         }
     }
 
-    #[allow(unused)]
     #[derive(Debug, Clone, serde::Deserialize)]
-    pub struct PRStartAns {
+    pub struct PRStartAnsPlain {
+        #[serde(rename = "ProtocolVersion")]
+        pub protocol_version: String,
+        #[serde(rename = "SenderID")]
+        pub sender_id: String,
+        #[serde(rename = "ReceiverID")]
+        pub receiver_id: String,
+        #[serde(rename = "TransactionID")]
+        pub transaction_id: u64,
+        #[serde(rename = "MessageType")]
+        pub message_type: String,
+        #[serde(rename = "Result")]
+        pub result: PRStartAnsResult,
+    }
+
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub struct PRStartAnsDownlink {
         #[serde(rename = "ProtocolVersion")]
         pub protocol_version: String,
         #[serde(rename = "SenderID")]
@@ -728,14 +808,12 @@ mod http {
         pub dev_addr: String,
     }
 
-    #[allow(unused)]
     #[derive(Debug, Clone, serde::Deserialize)]
     pub struct PRStartAnsResult {
         #[serde(rename = "ResultCode")]
         pub result_code: String,
     }
 
-    #[allow(unused)]
     #[derive(Debug, Clone, serde::Deserialize)]
     pub struct PRStartAnsDLMetaData {
         #[serde(rename = "DevEUI")]
@@ -766,15 +844,18 @@ mod http {
         pub hi_priority_flag: bool,
     }
 
-    impl From<PRStartAns> for PacketRouterPacketDownV1 {
-        fn from(value: PRStartAns) -> Self {
+    impl From<PRStartAnsDownlink> for PacketRouterPacketDownV1 {
+        fn from(value: PRStartAnsDownlink) -> Self {
             let freq1 = value.dl_meta_data.dl_freq_1;
             let freq1 = (freq1 * 1_000_000.0) as u32; // mHz -> Hz
 
             let freq2 = value.dl_meta_data.dl_freq_2;
             let freq2 = (freq2 * 1_000_000.0) as u32; // mHz -> Hz
+
+            let payload =
+                hex::decode(value.phy_payload.clone()).expect("hex decode downlink payload");
             Self {
-                payload: value.phy_payload.into(),
+                payload,
                 rx1: Some(WindowV1 {
                     timestamp: ((value.dl_meta_data.fns_ul_token.timestamp + 5_000_000) as u32)
                         as u64,
@@ -794,35 +875,44 @@ mod http {
     }
 
     mod test {
-        #[allow(unused)]
-        use crate::http::{PRStartAns, XmitDataReq};
-        #[allow(unused)]
+        #![allow(unused)]
+        use super::PRStartAnsPlain;
+        use crate::http::{PRStartAnsDownlink, XmitDataReq};
         use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
 
         #[test]
         fn xmit_data_req_to_packet_down_v1() {
             let value = serde_json::json!({
-                "ProtocolVersion": "1.1",
-                "SenderID": "000042",
-                "ReceiverID": "0xC00053",
-                "SenderNSID": "downlink-test-body-sender-nsid",
-                "ReceiverNSID": "receiver-nsid",
-                "TransactionID": 12348675,
-                "MessageType": "XmitDataReq",
-                "PHYPayload": "this-is-a-payload",
-                "DLMetaData": {
-                    "DevEUI": "0xaabbffccfeeff001",
-                    "DLFreq1": 904.3,
-                    "DataRate1": 0,
-                    "RXDelay1": 1,
-                    "FNSULToken": "7b2274696d657374616d70223a343034383533323435322c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d",
-                    "GWInfo": [
-                        {"ULToken": "another-token"}
-                    ],
-                    "ClassMode": "A",
-                    "HiPriorityFlag": false
+                "ProtocolVersion":"1.0",
+                "SenderID":"000024",
+                "ReceiverID":"c00053",
+                "TransactionID":274631693,
+                "MessageType":"XmitDataReq",
+                "PHYPayload":"6073000048ab00000300020070030000ff01063d32ce60",
+                "ULMetaData":null,
+                "DLMetaData":{
+                    "DevEUI":"0000000000000003",
+                    "FPort":null,
+                    "FCntDown":null,
+                    "Confirmed":false,
+                    "DLFreq1":926.9,
+                    "DLFreq2":923.3,
+                    "RXDelay1":1,
+                    "ClassMode":"A",
+                    "DataRate1":10,
+                    "DataRate2":8,
+                    "FNSULToken":"7b2274696d657374616d70223a31303739333532372c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d",
+                    "GWInfo":[{
+                        "FineRecvTime":null,
+                        "RSSI":null,
+                        "SNR":null,
+                        "Lat":null,
+                        "Lon":null,
+                        "DLAllowed":null
+                    }],
+                    "HiPriorityFlag":false}
                 }
-            });
+            );
             let packet: XmitDataReq = serde_json::from_value(value).unwrap();
             println!("packet: {packet:#?}");
             let down: PacketRouterPacketDownV1 = packet.into();
@@ -865,10 +955,17 @@ mod http {
                 },
                 "DevAddr": "48000037"
             });
-            let packet: PRStartAns = serde_json::from_value(value).expect("to packet down");
+            let packet: PRStartAnsDownlink = serde_json::from_value(value).expect("to packet down");
             println!("packet: {packet:#?}");
             let down: PacketRouterPacketDownV1 = packet.into();
             println!("down: {down:#?}");
+        }
+
+        #[test]
+        fn mic_failed() {
+            let value = serde_json::json!({"ProtocolVersion":"1.1","SenderID":"000024","ReceiverID":"c00053","TransactionID":517448448,"MessageType":"PRStartAns","Result":{"ResultCode":"MICFailed","Description":"Invalid MIC"},"Lifetime":null,"FNwkSIntKey":null,"NwkSKey":null,"FCntUp":null,"ServiceProfile":null,"DLMetaData":null});
+            let packet: PRStartAnsPlain = serde_json::from_value(value).expect("to pr plain");
+            println!("plain: {packet:#?}");
         }
     }
 }
