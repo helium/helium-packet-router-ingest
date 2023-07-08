@@ -15,9 +15,12 @@ enum Commands {
 
 #[derive(Default, Debug, Clone, clap::Args)]
 pub struct HttpConfig {
-    /// Identity of the NS, unique to HTTP forwarder
+    /// Identity of the this NS, unique to HTTP forwarder
     #[arg(long, default_value = "6081FFFE12345678")]
     pub sender_nsid: String,
+    /// Identify of the receiving NS
+    #[arg(long, default_value = "0000000000000000")]
+    pub receiver_nsid: String,
     /// How long were the packets held in ms
     #[arg(long, default_value = "1250")]
     pub dedupe_window_size: u64,
@@ -28,6 +31,10 @@ pub struct HttpConfig {
     /// NetID of the network operating the http forwarder
     #[arg(long, default_value = "000000")]
     pub target_net_id: String,
+    /// Send PRStartNotif message after sending Downlink to gateway.
+    /// Chirpstack does nothing with the notif message and returns an 400.
+    #[arg(long, default_value = "false")]
+    pub send_pr_start_notif: bool,
 }
 
 #[tokio::main]
@@ -60,6 +67,7 @@ mod server {
     pub struct MsgSender(Sender<Msg>);
 
     type GW = String;
+    type TransactionID = u64;
 
     /// This message contains the entirety of the lifecycle of routing packets from hpr through http.
     ///
@@ -80,9 +88,13 @@ mod server {
         GrpcUplink(PacketRouterPacketUpV1),
         /// A gateway stream has ended
         GrpcDisconnect(GW),
-        ///
-        HttpDownlink(GW, PacketRouterPacketDownV1),
-        /// The DedupWindow has elapsed for a PacketHash.s
+        /// A Downlink has been received over HTTP.
+        /// Find the GW to forward it to.
+        HttpDownlink(GW, PacketRouterPacketDownV1, TransactionID),
+        /// Downlink has been sent to the gateway, Notify the Roamer
+        HttpNotif(TransactionID),
+        /// The DedupWindow has elapsed for a PacketHash.
+        /// Send the packet
         DedupDone(PacketHash),
         /// The Cleanup window has elapsed for a PacketHash.
         DedupCleanup(PacketHash),
@@ -125,11 +137,23 @@ mod server {
             self.0.send(Msg::GrpcUplink(packet)).await.expect("uplink");
         }
 
-        pub async fn downlink(&self, gw: GW, packet: PacketRouterPacketDownV1) {
+        pub async fn downlink(
+            &self,
+            gw: GW,
+            packet: PacketRouterPacketDownV1,
+            transaction_id: TransactionID,
+        ) {
             self.0
-                .send(Msg::HttpDownlink(gw, packet))
+                .send(Msg::HttpDownlink(gw, packet, transaction_id))
                 .await
                 .expect("downlink");
+        }
+
+        pub async fn pr_notif(&self, transaction_id: TransactionID) {
+            self.0
+                .send(Msg::HttpNotif(transaction_id))
+                .await
+                .expect("pr_notif");
         }
     }
 
@@ -142,6 +166,7 @@ mod server {
             Duration::from_secs(10),
         );
 
+        let reader_tx = MsgSender(tx.clone());
         let reader_thread = tokio::spawn(async move {
             let mut downlink_map = HashMap::new();
             tracing::info!("reading thread started");
@@ -166,19 +191,47 @@ mod server {
                     Msg::GrpcUplink(packet) => {
                         deduplicator.handle_packet(packet);
                     }
-                    Msg::HttpDownlink(gw, downlink) => match downlink_map.get(&gw) {
-                        Some(sender) => {
-                            let _ = sender
-                                .send(Ok(EnvelopeDownV1 {
-                                    data: Some(envelope_down_v1::Data::Packet(downlink)),
-                                }))
-                                .await;
-                            tracing::info!(gw, "downlink sent");
+                    Msg::HttpDownlink(gw, downlink, transaction_id) => {
+                        match downlink_map.get(&gw) {
+                            Some(sender) => {
+                                let _ = sender
+                                    .send(Ok(EnvelopeDownV1 {
+                                        data: Some(envelope_down_v1::Data::Packet(downlink)),
+                                    }))
+                                    .await;
+                                tracing::info!(gw, "downlink sent");
+                                if http_config.send_pr_start_notif {
+                                    let _ = reader_tx.pr_notif(transaction_id).await;
+                                }
+                            }
+                            None => {
+                                tracing::warn!(
+                                    ?gw,
+                                    ?downlink_map,
+                                    "cannot downlink to unknown gateway"
+                                )
+                            }
                         }
-                        None => {
-                            tracing::warn!(?gw, ?downlink_map, "cannot downlink to unknown gateway")
-                        }
-                    },
+                    }
+                    Msg::HttpNotif(transaction_id) => {
+                        let local_chirpstack_url = "http://127.0.0.1:9005";
+                        let body = serde_json::json!({
+                            "ProtocolVersion": "1.1",
+                            "SenderID": http_config.helium_net_id,
+                            "ReceiverID": http_config.target_net_id,
+                            "TransactionID": transaction_id,
+                            "MessageType": "PRStartNotif",
+                            "SenderNSID": http_config.sender_nsid,
+                            "ReceiverNSID": http_config.receiver_nsid,
+                            "Result": {"ResultCode": "Success"}
+                        });
+                        let res = reqwest::Client::new()
+                            .post(local_chirpstack_url)
+                            .body(serde_json::to_string(&body).expect("turning into json"))
+                            .send()
+                            .await;
+                        tracing::info!(?body, local_chirpstack_url, ?res, "pr notif");
+                    }
                     Msg::DedupDone(hash) => {
                         let packets = deduplicator.get_packets(&hash);
                         tracing::info!(num_packets = packets.len(), "deduplication done");
@@ -239,6 +292,7 @@ mod server {
             "ProtocolVersion" : "1.1",
             "MessageType": "PRStartReq",
             "SenderNSID": config.sender_nsid,
+            "ReceiverNSID": config.receiver_nsid,
             "DedupWindowSize": config.dedupe_window_size,
             "SenderID": config.helium_net_id,
             "ReceiverID": config.target_net_id,
@@ -256,7 +310,7 @@ mod server {
         }))
     }
 
-    #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
     pub struct Token {
         pub timestamp: u64,
         pub gateway: GW,
@@ -572,10 +626,12 @@ mod http {
         extract::Json(downlink): extract::Json<serde_json::Value>,
     ) -> impl IntoResponse {
         tracing::info!(?downlink, "http downlink");
-        let downlink: PRStartAns = serde_json::from_value(downlink).unwrap();
-        let gateway = downlink.dl_meta_data.fns_ul_token.gateway.clone();
-        let packet_down = downlink.into();
-        sender.downlink(gateway, packet_down).await;
+        let pr_start: PRStartAns = serde_json::from_value(downlink).unwrap();
+        let gateway = pr_start.dl_meta_data.fns_ul_token.gateway.clone();
+        let packet_down = pr_start.clone().into();
+        sender
+            .downlink(gateway, packet_down, pr_start.transaction_id)
+            .await;
         (StatusCode::ACCEPTED, "Downlink Accepted")
     }
 
@@ -588,8 +644,6 @@ mod http {
         sender_id: String,
         #[serde(rename = "ReceiverID")]
         receiver_id: String,
-        #[serde(rename = "SenderNSID")]
-        sender_nsid: String,
         #[serde(rename = "ReceiverNSID")]
         receiver_nsid: String,
         #[serde(rename = "TransactionID")]
@@ -648,68 +702,68 @@ mod http {
     }
 
     #[allow(unused)]
-    #[derive(Debug, serde::Deserialize)]
-    struct PRStartAns {
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub struct PRStartAns {
         #[serde(rename = "ProtocolVersion")]
-        protocol_version: String,
+        pub protocol_version: String,
         #[serde(rename = "SenderID")]
-        sender_id: String,
+        pub sender_id: String,
         #[serde(rename = "ReceiverID")]
-        receiver_id: String,
+        pub receiver_id: String,
         #[serde(rename = "TransactionID")]
-        transaction_id: u64,
+        pub transaction_id: u64,
         #[serde(rename = "MessageType")]
-        message_type: String,
+        pub message_type: String,
         #[serde(rename = "Result")]
-        result: PRStartAnsResult,
+        pub result: PRStartAnsResult,
         #[serde(rename = "PHYPayload")]
-        phy_payload: String,
+        pub phy_payload: String,
         #[serde(rename = "DevEUI")]
-        dev_eui: String,
+        pub dev_eui: String,
         #[serde(rename = "FCntUp")]
-        f_cnt_up: u32,
+        pub f_cnt_up: u32,
         #[serde(rename = "DLMetaData")]
-        dl_meta_data: PRStartAnsDLMetaData,
+        pub dl_meta_data: PRStartAnsDLMetaData,
         #[serde(rename = "DevAddr")]
-        dev_addr: String,
+        pub dev_addr: String,
     }
 
     #[allow(unused)]
-    #[derive(Debug, serde::Deserialize)]
-    struct PRStartAnsResult {
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub struct PRStartAnsResult {
         #[serde(rename = "ResultCode")]
-        result_code: String,
+        pub result_code: String,
     }
 
     #[allow(unused)]
-    #[derive(Debug, serde::Deserialize)]
-    struct PRStartAnsDLMetaData {
+    #[derive(Debug, Clone, serde::Deserialize)]
+    pub struct PRStartAnsDLMetaData {
         #[serde(rename = "DevEUI")]
-        dev_eui: String,
+        pub dev_eui: String,
         #[serde(rename = "FPort")]
-        f_port: Option<String>,
+        pub f_port: Option<String>,
         #[serde(rename = "FCntDown")]
-        f_cnt_down: Option<String>,
+        pub f_cnt_down: Option<String>,
         #[serde(rename = "Confirmed")]
-        confirmed: bool,
+        pub confirmed: bool,
         #[serde(rename = "DLFreq1")]
-        dl_freq_1: f32,
+        pub dl_freq_1: f32,
         #[serde(rename = "DLFreq2")]
-        dl_freq_2: f32,
+        pub dl_freq_2: f32,
         #[serde(rename = "RXDelay1")]
-        rx_delay_1: u8,
+        pub rx_delay_1: u8,
         #[serde(rename = "ClassMode")]
-        class_mode: String,
+        pub class_mode: String,
         #[serde(rename = "DataRate1")]
-        data_rate_1: u8,
+        pub data_rate_1: u8,
         #[serde(rename = "DataRate2")]
-        data_rate_2: u8,
+        pub data_rate_2: u8,
         #[serde(rename = "FNSULToken", with = "hex::serde")]
-        fns_ul_token: Token,
+        pub fns_ul_token: Token,
         #[serde(rename = "GWInfo")]
-        gw_info: Vec<HashMap<String, Option<String>>>,
+        pub gw_info: Vec<HashMap<String, Option<String>>>,
         #[serde(rename = "HiPriorityFlag")]
-        hi_priority_flag: bool,
+        pub hi_priority_flag: bool,
     }
 
     impl From<PRStartAns> for PacketRouterPacketDownV1 {
