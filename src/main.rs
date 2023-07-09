@@ -71,9 +71,9 @@ mod server {
     pub struct MsgSender(pub Sender<Msg>);
 
     #[derive(Debug)]
-    pub struct DownlinkSender(pub Sender<Result<EnvelopeDownV1, Status>>);
+    pub struct GatewayTx(pub Sender<Result<EnvelopeDownV1, Status>>);
 
-    impl DownlinkSender {
+    impl GatewayTx {
         pub async fn send_downlink(&self, downlink: PacketRouterPacketDownV1) {
             let _ = self
                 .0
@@ -100,38 +100,63 @@ mod server {
     /// Too long may lead to memory issues.
     #[derive(Debug)]
     pub enum Msg {
-        /// First contact with a gateway. Use the Sender for Downlinks.
-        GrpcConnect(GW, DownlinkSender),
-        /// A packet has been received
-        GrpcUplink(PacketRouterPacketUpV1),
-        /// A gateway stream has ended
-        GrpcDisconnect(GW),
-        /// A JoinAccept Downlink has been received over HTTP.
-        /// Find the GW to forward it to.
-        HttpPRStartAnsDownlink(PRStartAnsDownlink),
-        /// A Downlink has been received over HTTP
-        HttpXmitDataReqDownlink(XmitDataReq),
-        /// Join Accept Downlink has been sent to the gateway, Notify the Roamer
-        HttpNotif(TransactionID),
-        /// Downlink has been sent to the gateway, Notify the Roamer
-        HttpXmitAns(XmitDataReq),
-        /// All HTTP sends go through here
-        HttpSend(String),
-        /// The DedupWindow has elapsed for a PacketHash.
-        /// Send the packet
-        DedupDone(PacketHash),
-        /// The Cleanup window has elapsed for a PacketHash.
-        DedupCleanup(PacketHash),
+        Uplink(UplinkMsg),
+        Downlink(DownlinkMsg),
+        Gateway(GatewayMsg),
+    }
+
+    #[derive(Debug)]
+    pub enum UplinkMsg {
+        Receive(PacketRouterPacketUpV1),
+        Send(PacketHash),
+        Cleanup(PacketHash),
+    }
+
+    #[derive(Debug)]
+    pub enum DownlinkMsg {
+        JoinAccept(PRStartAnsDownlink),
+        Downlink(XmitDataReq),
+    }
+
+    impl DownlinkMsg {
+        fn gateway(&self) -> String {
+            match self {
+                Self::JoinAccept(pr_start) => pr_start.dl_meta_data.fns_ul_token.gateway.clone(),
+                Self::Downlink(xmit) => xmit.dl_meta_data.fns_ul_token.gateway.clone(),
+            }
+        }
+        fn transaction_id(&self) -> u64 {
+            match self {
+                Self::JoinAccept(pr_start) => pr_start.transaction_id,
+                Self::Downlink(xmit) => xmit.transaction_id,
+            }
+        }
+
+        fn packet_down(&self) -> PacketRouterPacketDownV1 {
+            match self {
+                Self::JoinAccept(p) => p.into(),
+                Self::Downlink(p) => p.into(),
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum GatewayMsg {
+        Connect(GW, GatewayTx),
+        Disconnect(GW),
     }
 
     impl MsgSender {
         pub async fn dedup_done(&self, key: String) {
-            self.0.send(Msg::DedupDone(key)).await.expect("dedup_done");
+            self.0
+                .send(Msg::Uplink(UplinkMsg::Send(key)))
+                .await
+                .expect("dedup done");
         }
 
         pub async fn dedup_cleanup(&self, key: String) {
             self.0
-                .send(Msg::DedupCleanup(key))
+                .send(Msg::Uplink(UplinkMsg::Cleanup(key)))
                 .await
                 .expect("dedup_cleanup");
         }
@@ -139,55 +164,43 @@ mod server {
         pub async fn gateway_connect(
             &self,
             packet: &PacketRouterPacketUpV1,
-            downlink_sender: DownlinkSender,
+            downlink_sender: GatewayTx,
         ) {
             self.0
-                .send(Msg::GrpcConnect(packet.gateway_b58(), downlink_sender))
+                .send(Msg::Gateway(GatewayMsg::Connect(
+                    packet.gateway_b58(),
+                    downlink_sender,
+                )))
                 .await
                 .expect("gateway_connect");
         }
 
         pub async fn gateway_disconnect(&self, gateway: GW) {
             self.0
-                .send(Msg::GrpcDisconnect(gateway))
+                .send(Msg::Gateway(GatewayMsg::Disconnect(gateway)))
                 .await
                 .expect("gateway_disconnect");
         }
 
         pub async fn uplink(&self, packet: PacketRouterPacketUpV1) {
-            self.0.send(Msg::GrpcUplink(packet)).await.expect("uplink");
+            self.0
+                .send(Msg::Uplink(UplinkMsg::Receive(packet)))
+                .await
+                .expect("uplink");
         }
 
         pub async fn join_accept_downlink(&self, pr_start_ans: PRStartAnsDownlink) {
             self.0
-                .send(Msg::HttpPRStartAnsDownlink(pr_start_ans))
+                .send(Msg::Downlink(DownlinkMsg::JoinAccept(pr_start_ans)))
                 .await
                 .expect("join accept downlink");
         }
 
         pub async fn data_downlink(&self, xmit_req: XmitDataReq) {
             self.0
-                .send(Msg::HttpXmitDataReqDownlink(xmit_req))
+                .send(Msg::Downlink(DownlinkMsg::Downlink(xmit_req)))
                 .await
                 .expect("data downlink");
-        }
-
-        pub async fn pr_notif(&self, transaction_id: TransactionID) {
-            self.0
-                .send(Msg::HttpNotif(transaction_id))
-                .await
-                .expect("pr_notif");
-        }
-
-        pub async fn xmit_ans(&self, xmit_req: XmitDataReq) {
-            self.0
-                .send(Msg::HttpXmitAns(xmit_req))
-                .await
-                .expect("xmit_ans");
-        }
-
-        pub async fn http_send(&self, body: String) {
-            self.0.send(Msg::HttpSend(body)).await.expect("http send");
         }
     }
 
@@ -200,82 +213,78 @@ mod server {
             Duration::from_secs(10),
         );
 
-        let reader_tx = MsgSender(tx.clone());
         let reader_thread = tokio::spawn(async move {
-            let mut downlink_map = HashMap::new();
+            let mut gateway_map: HashMap<String, GatewayTx> = HashMap::new();
             tracing::info!("reading thread started");
-            let client = reqwest::Client::new();
+
+            let http_send = |body: String| async {
+                reqwest::Client::new()
+                    .post(http_config.lns_endpoint.clone())
+                    .body(body)
+                    .send()
+                    .await
+            };
+
             while let Some(msg) = rx.recv().await {
                 match msg {
-                    Msg::GrpcConnect(gw, chan) => {
-                        let _prev_val = downlink_map.insert(gw, chan);
-                        tracing::info!(size = downlink_map.len(), "gateway connect");
-                    }
-                    Msg::GrpcDisconnect(gw) => {
-                        let _prev_val = downlink_map.remove(&gw);
-                        tracing::info!(size = downlink_map.len(), "gateway disconnect");
-                    }
-                    Msg::GrpcUplink(packet) => {
-                        deduplicator.handle_packet(packet);
-                    }
-                    Msg::HttpPRStartAnsDownlink(pr_start) => {
-                        let gw = pr_start.dl_meta_data.fns_ul_token.gateway.clone();
-                        let transaction_id = pr_start.transaction_id;
-                        match downlink_map.get(&gw) {
-                            Some(sender) => {
-                                sender.send_downlink(pr_start.into()).await;
-                                tracing::info!(gw, "downlink sent");
-                                if http_config.send_pr_start_notif {
-                                    let _ = reader_tx.pr_notif(transaction_id).await;
+                    Msg::Uplink(inner) => match inner {
+                        UplinkMsg::Receive(packet) => {
+                            // Is there a way to make it clear that deduplicating triggers send later?
+                            deduplicator.handle_packet(packet);
+                        }
+                        UplinkMsg::Send(packet_hash) => {
+                            let packets = deduplicator.get_packets(&packet_hash);
+                            tracing::info!(num_packets = packets.len(), "deduplication done");
+                            match make_payload(packets, &http_config) {
+                                Ok(body) => {
+                                    let _ = http_send(body).await;
+                                }
+                                Err(_) => {
+                                    tracing::warn!("ignoring invalid packet");
+                                }
+                            };
+                        }
+                        UplinkMsg::Cleanup(packet_hash) => {
+                            deduplicator.remove_packets(&packet_hash);
+                        }
+                    },
+                    Msg::Downlink(source) => {
+                        let gw = source.gateway();
+                        let transaction_id = source.transaction_id();
+                        match gateway_map.get(&gw) {
+                            Some(gateway) => {
+                                gateway.send_downlink(source.packet_down()).await;
+                                tracing::info!(gw, "uplink sent");
+
+                                match source {
+                                    DownlinkMsg::JoinAccept(_) => {
+                                        if http_config.send_pr_start_notif {
+                                            let body =
+                                                make_pr_start_notif(transaction_id, &http_config);
+                                            let _ = http_send(body).await;
+                                            tracing::debug!("http notif");
+                                        }
+                                    }
+                                    DownlinkMsg::Downlink(xmit) => {
+                                        let body = make_xmit_data_ans(&xmit, &http_config);
+                                        let _ = http_send(body).await;
+                                        tracing::debug!("http xmit ans");
+                                    }
                                 }
                             }
                             None => tracing::warn!(?gw, "join accept for unknown gateway"),
                         }
                     }
-                    Msg::HttpXmitDataReqDownlink(xmit_req) => {
-                        let gw = xmit_req.dl_meta_data.fns_ul_token.gateway.clone();
-                        match downlink_map.get(&gw) {
-                            Some(sender) => {
-                                sender.send_downlink(xmit_req.clone().into()).await;
-                                tracing::info!(gw, "downlink sent");
-                                let _ = reader_tx.xmit_ans(xmit_req).await;
-                            }
-                            None => tracing::warn!(?gw, "join accept for unknown gateway"),
+                    Msg::Gateway(inner) => match inner {
+                        GatewayMsg::Connect(gw, sender) => {
+                            let _prev_val = gateway_map.insert(gw, sender);
+                            tracing::info!(size = gateway_map.len(), "gateway connect");
                         }
-                    }
-                    Msg::HttpNotif(transaction_id) => {
-                        let body = make_pr_start_notif(transaction_id, &http_config);
-                        reader_tx.http_send(body).await;
-                        tracing::debug!("http notif");
-                    }
-                    Msg::HttpXmitAns(xmit_req) => {
-                        let body = make_xmit_data_ans(&xmit_req, &http_config);
-                        reader_tx.http_send(body).await;
-                        tracing::debug!("http xmit ans");
-                    }
-                    Msg::HttpSend(body) => {
-                        let res = client
-                            .post(&http_config.lns_endpoint)
-                            .body(body.clone())
-                            .send()
-                            .await;
-                        tracing::debug!(?body, ?res, "http send");
-                    }
-                    Msg::DedupDone(hash) => {
-                        let packets = deduplicator.get_packets(&hash);
-                        tracing::info!(num_packets = packets.len(), "deduplication done");
-                        match make_payload(packets, &http_config) {
-                            Ok(body) => {
-                                reader_tx.http_send(body).await;
-                            }
-                            Err(_) => {
-                                tracing::warn!("ignoring invalid packet");
-                            }
-                        };
-                    }
-                    Msg::DedupCleanup(hash) => {
-                        deduplicator.remove_packets(&hash);
-                    }
+                        GatewayMsg::Disconnect(gw) => {
+                            let _prev_val = gateway_map.remove(&gw);
+                            tracing::info!(size = gateway_map.len(), "gateway disconnect");
+                        }
+                    },
                 }
             }
         });
@@ -742,8 +751,8 @@ mod http {
         pub ul_token: Option<String>,
     }
 
-    impl From<XmitDataReq> for PacketRouterPacketDownV1 {
-        fn from(value: XmitDataReq) -> Self {
+    impl From<&XmitDataReq> for PacketRouterPacketDownV1 {
+        fn from(value: &XmitDataReq) -> Self {
             let freq = value.dl_meta_data.dl_freq_1;
             let freq = (freq * 1_000_000.0) as u32; // mHz -> Hz
             let payload =
@@ -846,8 +855,8 @@ mod http {
         pub hi_priority_flag: bool,
     }
 
-    impl From<PRStartAnsDownlink> for PacketRouterPacketDownV1 {
-        fn from(value: PRStartAnsDownlink) -> Self {
+    impl From<&PRStartAnsDownlink> for PacketRouterPacketDownV1 {
+        fn from(value: &PRStartAnsDownlink) -> Self {
             let freq1 = value.dl_meta_data.dl_freq_1;
             let freq1 = (freq1 * 1_000_000.0) as u32; // mHz -> Hz
 
@@ -915,7 +924,7 @@ mod http {
                     "HiPriorityFlag":false}
                 }
             );
-            let packet: XmitDataReq = serde_json::from_value(value).unwrap();
+            let packet: &XmitDataReq = &serde_json::from_value(value).unwrap();
             println!("packet: {packet:#?}");
             let down: PacketRouterPacketDownV1 = packet.into();
             println!("down: {down:#?}");
@@ -957,7 +966,8 @@ mod http {
                 },
                 "DevAddr": "48000037"
             });
-            let packet: PRStartAnsDownlink = serde_json::from_value(value).expect("to packet down");
+            let packet: &PRStartAnsDownlink =
+                &serde_json::from_value(value).expect("to packet down");
             println!("packet: {packet:#?}");
             let down: PacketRouterPacketDownV1 = packet.into();
             println!("down: {down:#?}");
@@ -975,7 +985,7 @@ mod http {
 mod grpc {
 
     use crate::server::MsgSender;
-    use crate::{packet_info::PacketMeta, server::DownlinkSender};
+    use crate::{packet_info::PacketMeta, server::GatewayTx};
     use helium_proto::services::router::{
         envelope_up_v1, packet_server::Packet, packet_server::PacketServer, EnvelopeDownV1,
         EnvelopeUpV1,
@@ -1029,7 +1039,7 @@ mod grpc {
                     if let Some(envelope_up_v1::Data::Packet(packet)) = msg.data {
                         if gateway.is_none() {
                             sender
-                                .gateway_connect(&packet, DownlinkSender(downlink_sender.clone()))
+                                .gateway_connect(&packet, GatewayTx(downlink_sender.clone()))
                                 .await;
                             gateway = Some(packet.gateway_b58())
                         }
