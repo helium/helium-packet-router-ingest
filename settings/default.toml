@@ -1,0 +1,32 @@
+## The unique identity of this fNS
+sender_nsid = "6081FFFE12345678"
+
+## The unique identify of the target receiver
+receiver_nsid = "0000000000000000"
+
+## Time to wait for uplink deduplication.
+dedup_window = "250ms"
+
+## Time to wait to remove an uplink after being forwarded.
+##
+## Making this too short could lead to duplicate posts for the 
+## same packets from gateways that are slow.
+cleanup_window = "30s"
+
+## Main Helium NetID.
+helium_net_id = "C00053"
+
+## NetID of the target network.
+target_net_id = "000000"
+
+## Not all LNSs handle a PRStartNotif message after a JoinAccept has been sent.
+send_pr_start_notif = false
+
+## Endpoint of LNS for all roaming messages.
+lns_endpoint = "http://localhost:9005"
+
+## Where to listen for Downlink messages from LNS.
+downlink_listen = "0.0.0.0:9002"
+
+## Where to listen for Uplink messages from Helium HPR.
+uplink_listen = "0.0.0.0:9000"

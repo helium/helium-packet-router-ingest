@@ -1,6 +1,9 @@
 use crate::config::Config;
+use ::config as external_config;
 use actions::MsgSender;
 use clap::Parser;
+use external_config::File;
+use std::path::PathBuf;
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
@@ -13,6 +16,7 @@ struct Cli {
 #[derive(Debug, Clone, clap::Subcommand)]
 enum Commands {
     Serve(Config),
+    ServeConfig { path: PathBuf },
 }
 
 #[tokio::main]
@@ -24,6 +28,16 @@ async fn main() {
 
     match cli.command {
         Commands::Serve(config) => run(config).await,
+        Commands::ServeConfig { path } => {
+            let filename = path.to_str().expect("filename");
+            let config = external_config::Config::builder()
+                .add_source(File::with_name(filename).required(false))
+                .build()
+                .and_then(|config| config.try_deserialize())
+                .expect("valid config file");
+
+            run(config).await
+        }
     }
 }
 
@@ -31,7 +45,7 @@ pub async fn run(config: Config) {
     let http_listen_addr = config.downlink_listen;
     let grpc_listen_addr = config.uplink_listen;
     let outgoing_addr = config.lns_endpoint.clone();
-    let dedup_window = config.dedupe_window;
+    let dedup_window = config.dedup_window;
 
     tracing::info!("uplink listen   :: {grpc_listen_addr}");
     tracing::info!("downlink listen :: {http_listen_addr}");
@@ -51,7 +65,7 @@ mod config {
     use duration_string::DurationString;
     use std::net::SocketAddr;
 
-    #[derive(Debug, Clone, clap::Args)]
+    #[derive(Debug, Clone, clap::Args, serde::Deserialize)]
     pub struct Config {
         /// Identity of the this NS, unique to HTTP forwarder
         #[arg(long, default_value = "6081FFFE12345678")]
@@ -61,7 +75,7 @@ mod config {
         pub receiver_nsid: String,
         /// How long were the packets held in duration time (1250ms, 1.2s)
         #[arg(long, default_value = "1250ms")]
-        pub dedupe_window: DurationString,
+        pub dedup_window: DurationString,
         /// How long before Packets are cleaned out of being deduplicated in duration time.
         #[arg(long, default_value = "10s")]
         pub cleanup_window: DurationString,
@@ -240,7 +254,7 @@ mod app {
         match action {
             UpdateAction::Noop => {}
             UpdateAction::StartTimerForNewPacket(hash) => {
-                let dedup = app.config.dedupe_window.into();
+                let dedup = app.config.dedup_window.into();
                 let cleanup = app.config.cleanup_window.into();
                 let sender = app.message_tx.clone();
                 tokio::spawn(async move {
@@ -809,7 +823,7 @@ mod http {
             "MessageType": "PRStartReq",
             "SenderNSID": config.sender_nsid,
             "ReceiverNSID": config.receiver_nsid,
-            "DedupWindowSize": config.dedupe_window.to_string(),
+            "DedupWindowSize": config.dedup_window.to_string(),
             "SenderID": config.helium_net_id,
             "ReceiverID": config.target_net_id,
             "PHYPayload": packet.json_payload(),
