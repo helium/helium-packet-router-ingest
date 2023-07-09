@@ -27,3 +27,4 @@ hex = {version = "0.4.3", features = ["serde"] }
 lorawan = "0.7.3"
 chrono = "0.4.26"
 xxhash-rust = { version = "0.8.6", features = ["xxh64"] }
+duration-string = { version = "0.3.0", features = ["serde"] }

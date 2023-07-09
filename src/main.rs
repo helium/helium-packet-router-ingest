@@ -1,3 +1,5 @@
+use crate::config::Config;
+use actions::MsgSender;
 use clap::Parser;
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
@@ -10,34 +12,7 @@ struct Cli {
 
 #[derive(Debug, Clone, clap::Subcommand)]
 enum Commands {
-    Serve(HttpConfig),
-}
-
-#[derive(Default, Debug, Clone, clap::Args)]
-pub struct HttpConfig {
-    /// Identity of the this NS, unique to HTTP forwarder
-    #[arg(long, default_value = "6081FFFE12345678")]
-    pub sender_nsid: String,
-    /// Identify of the receiving NS
-    #[arg(long, default_value = "0000000000000000")]
-    pub receiver_nsid: String,
-    /// How long were the packets held in ms
-    #[arg(long, default_value = "1250")]
-    pub dedupe_window_size: u64,
-    /// Helium forwarding NetID, for LNSs to identify which network to back through for downlinking.
-    /// (default: C00053)
-    #[arg(long, default_value = "C00053")]
-    pub helium_net_id: String,
-    /// NetID of the network operating the http forwarder
-    #[arg(long, default_value = "000000")]
-    pub target_net_id: String,
-    /// Send PRStartNotif message after sending Downlink to gateway.
-    /// Chirpstack does nothing with the notif message and returns an 400.
-    #[arg(long, default_value = "false")]
-    pub send_pr_start_notif: bool,
-    /// LNS Endpoint
-    #[arg(long, default_value = "http://localhost:9005")]
-    pub lns_endpoint: String,
+    Serve(Config),
 }
 
 #[tokio::main]
@@ -45,473 +20,402 @@ async fn main() {
     tracing_subscriber::fmt().init();
 
     let cli = Cli::parse();
-    tracing::info!(?cli, "opts");
+    tracing::debug!(?cli, "opts");
 
     match cli.command {
-        Commands::Serve(http_config) => server::run(http_config).await,
+        Commands::Serve(config) => run(config).await,
     }
 }
 
-mod server {
+pub async fn run(config: Config) {
+    let http_listen_addr = config.downlink_listen;
+    let grpc_listen_addr = config.uplink_listen;
+    let outgoing_addr = config.lns_endpoint.clone();
+    let dedup_window = config.dedupe_window;
+
+    tracing::info!("uplink listen   :: {grpc_listen_addr}");
+    tracing::info!("downlink listen :: {http_listen_addr}");
+    tracing::info!("uplink post     :: {outgoing_addr}");
+    tracing::info!("dedup window    :: {dedup_window}");
+
+    let (sender, receiver) = MsgSender::new();
+
+    let _ = tokio::try_join!(
+        app::start(sender.clone(), receiver, config),
+        http::start(sender.clone(), http_listen_addr),
+        grpc::start(sender.clone(), grpc_listen_addr)
+    );
+}
+
+mod config {
+    use duration_string::DurationString;
+    use std::net::SocketAddr;
+
+    #[derive(Debug, Clone, clap::Args)]
+    pub struct Config {
+        /// Identity of the this NS, unique to HTTP forwarder
+        #[arg(long, default_value = "6081FFFE12345678")]
+        pub sender_nsid: String,
+        /// Identify of the receiving NS
+        #[arg(long, default_value = "0000000000000000")]
+        pub receiver_nsid: String,
+        /// How long were the packets held in duration time (1250ms, 1.2s)
+        #[arg(long, default_value = "1250ms")]
+        pub dedupe_window: DurationString,
+        /// How long before Packets are cleaned out of being deduplicated in duration time.
+        #[arg(long, default_value = "10s")]
+        pub cleanup_window: DurationString,
+        /// Helium forwarding NetID, for LNSs to identify which network to back through for downlinking.
+        /// (default: C00053)
+        #[arg(long, default_value = "C00053")]
+        pub helium_net_id: String,
+        /// NetID of the network operating the http forwarder
+        #[arg(long, default_value = "000000")]
+        pub target_net_id: String,
+        /// Send PRStartNotif message after sending Downlink to gateway.
+        /// Chirpstack does nothing with the notif message and returns an 400.
+        #[arg(long, default_value = "false")]
+        pub send_pr_start_notif: bool,
+        /// LNS Endpoint
+        #[arg(long, default_value = "http://localhost:9005")]
+        pub lns_endpoint: String,
+        /// Http Server for Downlinks
+        #[arg(long, default_value = "0.0.0.0:9002")]
+        pub downlink_listen: SocketAddr,
+        /// Grpc Server for Uplinks
+        #[arg(long, default_value = "0.0.0.0:9000")]
+        pub uplink_listen: SocketAddr,
+    }
+
+    impl Config {
+        pub async fn post(&self, body: String) {
+            let res = reqwest::Client::new()
+                .post(self.lns_endpoint.clone())
+                .body(body.clone())
+                .send()
+                .await;
+            tracing::info!(?body, ?res, "post");
+        }
+    }
+}
+
+mod actions {
     use crate::{
-        deduplicator, grpc,
-        http::{self, PRStartAnsDownlink, XmitDataReq},
-        packet_info::{PacketHash, PacketMeta, RoutingInfo},
-        HttpConfig, Result,
+        grpc::{GatewayID, GatewayTx},
+        packet::{PacketDown, PacketHash, PacketUp},
     };
-    use helium_proto::services::router::{
-        envelope_down_v1, EnvelopeDownV1, PacketRouterPacketDownV1, PacketRouterPacketUpV1,
-    };
-    use hex::FromHex;
-    use std::{collections::HashMap, str::FromStr, time::Duration};
-    use tokio::sync::mpsc::Sender;
-    use tonic::Status;
+    use tokio::sync::mpsc::{Receiver, Sender};
 
     #[derive(Debug, Clone)]
     pub struct MsgSender(pub Sender<Msg>);
-
-    #[derive(Debug)]
-    pub struct GatewayTx(pub Sender<Result<EnvelopeDownV1, Status>>);
-
-    impl GatewayTx {
-        pub async fn send_downlink(&self, downlink: PacketRouterPacketDownV1) {
-            let _ = self
-                .0
-                .send(Ok(EnvelopeDownV1 {
-                    data: Some(envelope_down_v1::Data::Packet(downlink)),
-                }))
-                .await;
-        }
-    }
-
-    type GW = String;
-    type TransactionID = u64;
+    pub type MsgReceiver = Receiver<Msg>;
 
     /// This message contains the entirety of the lifecycle of routing packets from hpr through http.
     ///
-    /// At a gateways first packet, we register a downlink handler handler, the other side of the incoming stream.
+    /// At a gateway's first packet, we register a downlink handler for a gateway.
     /// Once a gateway is known packets will be ingested normally.
     ///
-    /// They are sent to the deduplicator, which will hold onto packets by hash until the DedupWindow has elapsed and the message `DedupDone` is sent.
-    /// The packets will be turned into their JSON payload and sent over to the roaming party.
-    ///
-    /// After `cleanup_timeout` has elapsed, a packet_hash will cleanup after itself.
-    /// Setting this too short may result in double delivery of packet groups.
-    /// Too long may lead to memory issues.
+    /// Packets are sent to the deduplicator, which will group packets by hash.
+    /// A `dedup_window` timer is started, after which the packets are forwarded to the roamer.
+    /// After, a `cleanup_window` timer is started to prevent immediate double delivery of late packets.
+    ///   Setting this too short may result in double delivery of packet groups.
+    ///   Too long may lead to memory issues.
     #[derive(Debug)]
     pub enum Msg {
-        Uplink(UplinkMsg),
-        Downlink(DownlinkMsg),
-        Gateway(GatewayMsg),
-    }
-
-    #[derive(Debug)]
-    pub enum UplinkMsg {
-        Receive(PacketRouterPacketUpV1),
-        Send(PacketHash),
-        Cleanup(PacketHash),
-    }
-
-    #[derive(Debug)]
-    pub enum DownlinkMsg {
-        JoinAccept(PRStartAnsDownlink),
-        Downlink(XmitDataReq),
-    }
-
-    impl DownlinkMsg {
-        fn gateway(&self) -> String {
-            match self {
-                Self::JoinAccept(pr_start) => pr_start.dl_meta_data.fns_ul_token.gateway.clone(),
-                Self::Downlink(xmit) => xmit.dl_meta_data.fns_ul_token.gateway.clone(),
-            }
-        }
-        fn transaction_id(&self) -> u64 {
-            match self {
-                Self::JoinAccept(pr_start) => pr_start.transaction_id,
-                Self::Downlink(xmit) => xmit.transaction_id,
-            }
-        }
-
-        fn packet_down(&self) -> PacketRouterPacketDownV1 {
-            match self {
-                Self::JoinAccept(p) => p.into(),
-                Self::Downlink(p) => p.into(),
-            }
-        }
-    }
-
-    #[derive(Debug)]
-    pub enum GatewayMsg {
-        Connect(GW, GatewayTx),
-        Disconnect(GW),
+        /// Incoming Packet from a Gateway.
+        UplinkReceive(PacketUp),
+        /// Deduplication timer has elapsed.
+        UplinkSend(PacketHash),
+        /// Cleanup timer has elapsed.
+        UplinkCleanup(PacketHash),
+        /// Downlink received for gateway from HTTP handler.
+        Downlink(PacketDown),
+        /// Gateway has Connected.
+        GatewayConnect(GatewayID, GatewayTx),
+        /// Gateway has Disconnected.
+        GatewayDisconnect(GatewayID),
     }
 
     impl MsgSender {
-        pub async fn dedup_done(&self, key: String) {
-            self.0
-                .send(Msg::Uplink(UplinkMsg::Send(key)))
-                .await
-                .expect("dedup done");
+        pub fn new() -> (MsgSender, MsgReceiver) {
+            let (tx, rx) = tokio::sync::mpsc::channel(512);
+            (MsgSender(tx), rx)
         }
 
-        pub async fn dedup_cleanup(&self, key: String) {
+        pub async fn uplink_receive(&self, packet: PacketUp) {
             self.0
-                .send(Msg::Uplink(UplinkMsg::Cleanup(key)))
-                .await
-                .expect("dedup_cleanup");
-        }
-
-        pub async fn gateway_connect(
-            &self,
-            packet: &PacketRouterPacketUpV1,
-            downlink_sender: GatewayTx,
-        ) {
-            self.0
-                .send(Msg::Gateway(GatewayMsg::Connect(
-                    packet.gateway_b58(),
-                    downlink_sender,
-                )))
-                .await
-                .expect("gateway_connect");
-        }
-
-        pub async fn gateway_disconnect(&self, gateway: GW) {
-            self.0
-                .send(Msg::Gateway(GatewayMsg::Disconnect(gateway)))
-                .await
-                .expect("gateway_disconnect");
-        }
-
-        pub async fn uplink(&self, packet: PacketRouterPacketUpV1) {
-            self.0
-                .send(Msg::Uplink(UplinkMsg::Receive(packet)))
+                .send(Msg::UplinkReceive(packet))
                 .await
                 .expect("uplink");
         }
 
-        pub async fn join_accept_downlink(&self, pr_start_ans: PRStartAnsDownlink) {
+        pub async fn uplink_send(&self, key: PacketHash) {
+            self.0.send(Msg::UplinkSend(key)).await.expect("dedup done");
+        }
+
+        pub async fn uplink_cleanup(&self, key: PacketHash) {
             self.0
-                .send(Msg::Downlink(DownlinkMsg::JoinAccept(pr_start_ans)))
+                .send(Msg::UplinkCleanup(key))
                 .await
-                .expect("join accept downlink");
+                .expect("dedup_cleanup");
         }
 
-        pub async fn data_downlink(&self, xmit_req: XmitDataReq) {
+        pub async fn gateway_connect(&self, packet: &PacketUp, downlink_sender: GatewayTx) {
             self.0
-                .send(Msg::Downlink(DownlinkMsg::Downlink(xmit_req)))
+                .send(Msg::GatewayConnect(packet.gateway_b58(), downlink_sender))
                 .await
-                .expect("data downlink");
-        }
-    }
-
-    pub async fn run(http_config: HttpConfig) {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(512);
-
-        let mut deduplicator = deduplicator::Deduplicator::new(
-            MsgSender(tx.clone()),
-            Duration::from_millis(1250),
-            Duration::from_secs(10),
-        );
-
-        let reader_thread = tokio::spawn(async move {
-            let mut gateway_map: HashMap<String, GatewayTx> = HashMap::new();
-            tracing::info!("reading thread started");
-
-            let http_send = |body: String| async {
-                reqwest::Client::new()
-                    .post(http_config.lns_endpoint.clone())
-                    .body(body)
-                    .send()
-                    .await
-            };
-
-            while let Some(msg) = rx.recv().await {
-                match msg {
-                    Msg::Uplink(inner) => match inner {
-                        UplinkMsg::Receive(packet) => {
-                            // Is there a way to make it clear that deduplicating triggers send later?
-                            deduplicator.handle_packet(packet);
-                        }
-                        UplinkMsg::Send(packet_hash) => {
-                            let packets = deduplicator.get_packets(&packet_hash);
-                            tracing::info!(num_packets = packets.len(), "deduplication done");
-                            match make_payload(packets, &http_config) {
-                                Ok(body) => {
-                                    let _ = http_send(body).await;
-                                }
-                                Err(_) => {
-                                    tracing::warn!("ignoring invalid packet");
-                                }
-                            };
-                        }
-                        UplinkMsg::Cleanup(packet_hash) => {
-                            deduplicator.remove_packets(&packet_hash);
-                        }
-                    },
-                    Msg::Downlink(source) => {
-                        let gw = source.gateway();
-                        let transaction_id = source.transaction_id();
-                        match gateway_map.get(&gw) {
-                            Some(gateway) => {
-                                gateway.send_downlink(source.packet_down()).await;
-                                tracing::info!(gw, "uplink sent");
-
-                                match source {
-                                    DownlinkMsg::JoinAccept(_) => {
-                                        if http_config.send_pr_start_notif {
-                                            let body =
-                                                make_pr_start_notif(transaction_id, &http_config);
-                                            let _ = http_send(body).await;
-                                            tracing::debug!("http notif");
-                                        }
-                                    }
-                                    DownlinkMsg::Downlink(xmit) => {
-                                        let body = make_xmit_data_ans(&xmit, &http_config);
-                                        let _ = http_send(body).await;
-                                        tracing::debug!("http xmit ans");
-                                    }
-                                }
-                            }
-                            None => tracing::warn!(?gw, "join accept for unknown gateway"),
-                        }
-                    }
-                    Msg::Gateway(inner) => match inner {
-                        GatewayMsg::Connect(gw, sender) => {
-                            let _prev_val = gateway_map.insert(gw, sender);
-                            tracing::info!(size = gateway_map.len(), "gateway connect");
-                        }
-                        GatewayMsg::Disconnect(gw) => {
-                            let _prev_val = gateway_map.remove(&gw);
-                            tracing::info!(size = gateway_map.len(), "gateway disconnect");
-                        }
-                    },
-                }
-            }
-        });
-
-        let http_thread = http::start(MsgSender(tx.clone()));
-        let grpc_thread = grpc::start(MsgSender(tx.clone()));
-
-        let _ = tokio::try_join!(grpc_thread, reader_thread, http_thread);
-    }
-
-    fn make_pr_start_notif(transaction_id: TransactionID, http_config: &HttpConfig) -> String {
-        serde_json::to_string(&serde_json::json!({
-            "ProtocolVersion": "1.1",
-            "SenderID": http_config.helium_net_id,
-            "ReceiverID": http_config.target_net_id,
-            "TransactionID": transaction_id,
-            "MessageType": "PRStartNotif",
-            "SenderNSID": http_config.sender_nsid,
-            "ReceiverNSID": http_config.receiver_nsid,
-            "Result": {"ResultCode": "Success"}
-        }))
-        .expect("pr_start_notif json")
-    }
-
-    fn make_xmit_data_ans(xmit: &XmitDataReq, http_config: &HttpConfig) -> String {
-        serde_json::to_string(&serde_json::json!({
-            "ProtocolVersion": "1.1",
-            "MessageType": "XmitDataAns",
-            "SenderID": http_config.helium_net_id,
-            "ReceiverID": http_config.target_net_id,
-            "SenderNSID": http_config.sender_nsid,
-            "ReceiverNSID": http_config.receiver_nsid,
-            "TransactionID": xmit.transaction_id,
-            "Result": {"ResultCode": "Success"},
-            "DLFreq1": xmit.dl_meta_data.dl_freq_1
-        }))
-        .expect("xmit_data_ans json")
-    }
-
-    // #[instrument]
-    fn make_payload(packets: Vec<PacketRouterPacketUpV1>, config: &HttpConfig) -> Result<String> {
-        let packet = packets.first().expect("at least one packet");
-
-        let (routing_key, routing_value) = match packet.routing_info() {
-            RoutingInfo::Eui { dev, .. } => ("DevEUI", dev),
-            RoutingInfo::Devaddr(devaddr) => ("DevAddr", devaddr),
-            RoutingInfo::Unknown => todo!("should never get here"),
-        };
-
-        let mut gw_info = vec![];
-        for packet in packets.iter() {
-            gw_info.push(serde_json::json!({
-                "ID": packet.gateway_mac_str(),
-                "RFRegion": packet.region().to_string(),
-                "RSSI": packet.rssi,
-                "SNR": packet.snr,
-                "DLAllowed": true
-            }));
+                .expect("gateway_connect");
         }
 
-        Ok(serde_json::to_string(&serde_json::json!({
-            "ProtocolVersion" : "1.1",
-            "MessageType": "PRStartReq",
-            "SenderNSID": config.sender_nsid,
-            "ReceiverNSID": config.receiver_nsid,
-            "DedupWindowSize": config.dedupe_window_size,
-            "SenderID": config.helium_net_id,
-            "ReceiverID": config.target_net_id,
-            "PHYPayload": hex::encode(&packet.payload),
-            "ULMetaData": {
-                routing_key: routing_value,
-                "DataRate": packet.datarate_index(),
-                "ULFreq": packet.frequency_mhz(),
-                "RecvTime": packet.recv_time(),
-                "RFRegion": packet.region(),
-                "FNSULToken": make_token(packet.gateway_b58(), packet.timestamp),
-                "GWCnt": packets.len(),
-                "GWInfo": gw_info
-            }
-        }))
-        .expect("pr_start_req json"))
-    }
-
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
-    pub struct Token {
-        pub timestamp: u64,
-        pub gateway: GW,
-    }
-
-    impl TryFrom<String> for Token {
-        type Error = anyhow::Error;
-
-        fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
-            let s = hex::decode(value).unwrap();
-            Ok(serde_json::from_slice(&s[..]).unwrap())
+        pub async fn gateway_disconnect(&self, gateway: GatewayID) {
+            self.0
+                .send(Msg::GatewayDisconnect(gateway))
+                .await
+                .expect("gateway_disconnect");
         }
-    }
 
-    impl FromStr for Token {
-        type Err = anyhow::Error;
-
-        fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-            let s = hex::decode(s).unwrap();
-            Ok(serde_json::from_slice(&s[..]).unwrap())
+        pub async fn downlink(&self, downlink: impl Into<PacketDown>) {
+            self.0
+                .send(Msg::Downlink(downlink.into()))
+                .await
+                .expect("downlink");
         }
-    }
-
-    impl FromHex for Token {
-        type Error = anyhow::Error;
-
-        fn from_hex<T: AsRef<[u8]>>(hex: T) -> std::result::Result<Self, Self::Error> {
-            let s = hex::decode(hex).unwrap();
-            Ok(serde_json::from_slice(&s[..]).unwrap())
-        }
-    }
-
-    fn make_token(gateway: GW, timestamp: u64) -> String {
-        let token = Token { gateway, timestamp };
-        hex::encode(serde_json::to_string(&token).unwrap())
     }
 }
 
-mod packet_info {
-    use helium_crypto::PublicKey;
-    use helium_proto::services::router::PacketRouterPacketUpV1;
-    use lorawan::parser::{DataHeader, PhyPayload, EUI64};
+mod app {
+    use crate::{
+        actions::{Msg, MsgSender},
+        deduplicator::{Deduplicator, HandlePacket},
+        grpc::{GatewayID, GatewayTx},
+        http,
+        packet::{PacketDown, PacketHash},
+        Config,
+    };
+    use std::collections::HashMap;
+    use tokio::sync::mpsc::Receiver;
 
-    pub type PacketHash = String;
-    type Eui = String;
-
-    #[derive(Debug, PartialEq)]
-    pub enum RoutingInfo {
-        Eui { app: Eui, dev: Eui },
-        Devaddr(Eui),
-        Unknown,
+    pub struct App {
+        deduplicator: Deduplicator,
+        gateway_map: HashMap<GatewayID, GatewayTx>,
+        config: Config,
+        message_tx: MsgSender,
+        message_rx: Receiver<Msg>,
     }
 
-    impl RoutingInfo {
-        fn new_eui(app: EUI64<&[u8]>, dev: EUI64<&[u8]>) -> Self {
-            Self::Eui {
-                app: EUI64::new(flip_endianness(app.as_ref()))
-                    .unwrap()
-                    .to_string(),
-                dev: EUI64::new(flip_endianness(dev.as_ref()))
-                    .unwrap()
-                    .to_string(),
+    pub enum UpdateAction {
+        Noop,
+        StartTimerForNewPacket(PacketHash),
+        SendDownlink(GatewayTx, PacketDown, Option<String>),
+        SendUplink(String),
+    }
+
+    impl App {
+        pub fn new(message_tx: MsgSender, message_rx: Receiver<Msg>, config: Config) -> Self {
+            Self {
+                deduplicator: Deduplicator::new(),
+                gateway_map: HashMap::new(),
+                message_tx,
+                message_rx,
+                config,
             }
         }
     }
 
-    fn flip_endianness(slice: &[u8]) -> Vec<u8> {
-        let mut flipped = Vec::with_capacity(slice.len());
-
-        for &byte in slice.iter().rev() {
-            flipped.push(byte);
-        }
-
-        flipped
+    pub fn start(
+        message_tx: MsgSender,
+        message_rx: Receiver<Msg>,
+        config: Config,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut app = App::new(message_tx, message_rx, config);
+            while let Some(msg) = app.message_rx.recv().await {
+                let action = update(&mut app, msg).await;
+                handle_update_action(&app, action).await;
+            }
+        })
     }
 
-    pub trait PacketMeta {
-        fn routing_info(&self) -> RoutingInfo;
-        fn frequency_mhz(&self) -> f64;
-        fn recv_time(&self) -> String;
-        fn datarate_index(&self) -> u32;
-        fn gateway_b58(&self) -> String;
-        fn gateway_mac_str(&self) -> String;
-        // fn gateway_mac(&self) -> Result<semtech_udp::MacAddress>;
+    pub async fn handle_update_action(app: &App, action: UpdateAction) {
+        match action {
+            UpdateAction::Noop => {}
+            UpdateAction::StartTimerForNewPacket(hash) => {
+                let dedup = app.config.dedupe_window.into();
+                let cleanup = app.config.cleanup_window.into();
+                let sender = app.message_tx.clone();
+                tokio::spawn(async move {
+                    use tokio::time::sleep;
+                    sleep(dedup).await;
+                    sender.uplink_send(hash.clone()).await;
+                    sleep(cleanup).await;
+                    sender.uplink_cleanup(hash).await;
+                });
+            }
+            UpdateAction::SendDownlink(gw, downlink, http) => {
+                let gateway_name = downlink.gateway();
+                gw.send_downlink(downlink.packet_down()).await;
+                tracing::info!(gw = gateway_name, "downlink sent");
+
+                if let Some(body) = http {
+                    app.config.post(body).await;
+                }
+            }
+            UpdateAction::SendUplink(body) => app.config.post(body).await,
+        }
     }
 
-    impl PacketMeta for PacketRouterPacketUpV1 {
-        fn gateway_b58(&self) -> String {
-            PublicKey::try_from(&self.gateway[..]).unwrap().to_string()
+    async fn update(app: &mut App, msg: Msg) -> UpdateAction {
+        match msg {
+            Msg::UplinkReceive(packet) => match app.deduplicator.handle_packet(packet) {
+                HandlePacket::New(hash) => UpdateAction::StartTimerForNewPacket(hash),
+                HandlePacket::Existing => {
+                    tracing::trace!("duplicate_packet");
+                    UpdateAction::Noop
+                }
+            },
+            Msg::UplinkSend(packet_hash) => {
+                let packets = app.deduplicator.get_packets(&packet_hash);
+                tracing::info!(num_packets = packets.len(), "deduplication done");
+                match http::make_pr_start_req(packets, &app.config) {
+                    Ok(body) => UpdateAction::SendUplink(body),
+                    Err(_) => {
+                        tracing::warn!("ignoring invalid packet");
+                        UpdateAction::Noop
+                    }
+                }
+            }
+            Msg::UplinkCleanup(packet_hash) => {
+                app.deduplicator.remove_packets(&packet_hash);
+                UpdateAction::Noop
+            }
+            Msg::Downlink(source) => {
+                let gw = source.gateway();
+                let transaction_id = source.transaction_id();
+                match app.gateway_map.get(&gw) {
+                    Some(gateway) => match source.as_ref() {
+                        PacketDown::JoinAccept(_) => {
+                            let http = if app.config.send_pr_start_notif {
+                                tracing::debug!("http notif");
+                                let body = http::make_pr_start_notif(transaction_id, &app.config);
+                                Some(body)
+                            } else {
+                                None
+                            };
+                            UpdateAction::SendDownlink(gateway.clone(), source, http)
+                        }
+                        PacketDown::Downlink(xmit) => {
+                            let body = http::make_xmit_data_ans(xmit, &app.config);
+                            tracing::debug!("http xmit ans");
+                            UpdateAction::SendDownlink(gateway.clone(), source, Some(body))
+                        }
+                    },
+                    None => {
+                        tracing::warn!(?gw, "join accept for unknown gateway");
+                        UpdateAction::Noop
+                    }
+                }
+            }
+            Msg::GatewayConnect(gw, sender) => {
+                let _prev_val = app.gateway_map.insert(gw, sender);
+                tracing::info!(size = app.gateway_map.len(), "gateway connect");
+                UpdateAction::Noop
+            }
+            Msg::GatewayDisconnect(gw) => {
+                let _prev_val = app.gateway_map.remove(&gw);
+                tracing::info!(size = app.gateway_map.len(), "gateway disconnect");
+                UpdateAction::Noop
+            }
+        }
+    }
+}
+
+mod packet {
+    use crate::{
+        http::{PRStartAnsDownlink, XmitDataReq},
+        Result,
+    };
+    use helium_crypto::PublicKey;
+    use helium_proto::services::router::{
+        PacketRouterPacketDownV1, PacketRouterPacketUpV1, WindowV1,
+    };
+    use lorawan::parser::{DataHeader, PhyPayload, EUI64};
+
+    #[derive(Debug, PartialEq, Eq, Hash, Clone)]
+    pub struct PacketHash(pub String);
+
+    #[derive(Debug, Clone)]
+    pub struct PacketUp {
+        packet: PacketRouterPacketUpV1,
+        recv_time: u64,
+    }
+
+    #[derive(Debug)]
+    pub enum PacketDown {
+        JoinAccept(Box<PRStartAnsDownlink>),
+        Downlink(Box<XmitDataReq>),
+    }
+
+    type Eui = String;
+    type DevAddr = String;
+    type GatewayB58 = String;
+
+    impl PacketUp {
+        pub fn gateway_b58(&self) -> GatewayB58 {
+            let gateway = &self.packet.gateway;
+            PublicKey::try_from(&gateway[..]).unwrap().to_string()
         }
 
-        fn routing_info(&self) -> RoutingInfo {
-            tracing::trace!(?self.payload, "payload");
-            match lorawan::parser::parse(self.payload.clone()).expect("valid packet") {
+        pub fn hash(&self) -> PacketHash {
+            use sha2::{Digest, Sha256};
+            PacketHash(String::from_utf8_lossy(&Sha256::digest(&self.packet.payload)).into())
+        }
+
+        pub fn routing_info(&self) -> RoutingInfo {
+            let payload = &self.packet.payload;
+            tracing::trace!(?payload, "payload");
+            match lorawan::parser::parse(payload.clone()).expect("valid packet") {
                 PhyPayload::JoinAccept(_) => RoutingInfo::Unknown,
                 PhyPayload::JoinRequest(request) => {
                     let app = request.app_eui();
                     let dev = request.dev_eui();
-                    RoutingInfo::new_eui(app, dev)
+                    RoutingInfo::eui(app, dev)
                 }
                 PhyPayload::Data(payload) => match payload {
                     lorawan::parser::DataPayload::Encrypted(phy) => {
                         let devaddr = phy.fhdr().dev_addr().to_string();
-                        RoutingInfo::Devaddr(devaddr)
+                        RoutingInfo::devaddr(devaddr)
                     }
                     lorawan::parser::DataPayload::Decrypted(_) => RoutingInfo::Unknown,
                 },
             }
         }
 
-        fn gateway_mac_str(&self) -> String {
-            let hash = xxhash_rust::xxh64::xxh64(&self.gateway[1..], 0);
+        pub fn gateway_mac_str(&self) -> String {
+            let hash = xxhash_rust::xxh64::xxh64(&self.packet.gateway[1..], 0);
             let hash = hash.to_be_bytes();
             hex::encode(hash)
         }
 
-        fn frequency_mhz(&self) -> f64 {
-            // Truncate -> Round -> Truncate
-            let freq = (self.frequency as f64) / 1_000.0;
-            freq.round() / 1_000.0
+        pub fn region(&self) -> String {
+            self.packet.region().to_string()
         }
 
-        fn recv_time(&self) -> String {
-            // FIXME: This time should be when the NS received the packet, not the time the gw sent it.
-            // fn current_timestamp() -> u64 {
-            //     SystemTime::now()
-            //         .duration_since(UNIX_EPOCH)
-            //         .unwrap()
-            //         .as_millis() as u64
-            // }
-            use chrono::{DateTime, NaiveDateTime, Utc};
-
-            let dt = DateTime::<Utc>::from_utc(
-                NaiveDateTime::from_timestamp_millis(self.timestamp as i64)
-                    .expect("valid timestamp"),
-                Utc,
-            );
-            dt.to_rfc3339()
+        pub fn rssi(&self) -> i32 {
+            self.packet.rssi
         }
 
-        fn datarate_index(&self) -> u32 {
+        pub fn snr(&self) -> f32 {
+            self.packet.snr
+        }
+
+        pub fn json_payload(&self) -> String {
+            hex::encode(&self.packet.payload)
+        }
+
+        pub fn datarate_index(&self) -> u32 {
+            // FIXME: handle different region
             use helium_proto::DataRate;
-            match self.datarate() {
+            match self.packet.datarate() {
                 DataRate::Sf12bw125 => todo!(),
                 DataRate::Sf11bw125 => todo!(),
                 DataRate::Sf10bw125 => 0,
@@ -539,11 +443,182 @@ mod packet_info {
                 DataRate::Fsk50 => todo!(),
             }
         }
+
+        pub fn frequency_mhz(&self) -> f64 {
+            // Truncate -> Round -> Truncate
+            let freq = (self.packet.frequency as f64) / 1_000.0;
+            freq.round() / 1_000.0
+        }
+
+        /// This is the time the NS received the packet.
+        pub fn recv_time(&self) -> String {
+            use chrono::{DateTime, NaiveDateTime, Utc};
+            let dt = DateTime::<Utc>::from_utc(
+                NaiveDateTime::from_timestamp_millis(self.recv_time as i64)
+                    .expect("valid timestamp"),
+                Utc,
+            );
+            dt.to_rfc3339()
+        }
+
+        pub fn timestamp(&self) -> u64 {
+            self.packet.timestamp
+        }
     }
 
+    impl From<PacketRouterPacketUpV1> for PacketUp {
+        fn from(value: PacketRouterPacketUpV1) -> Self {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as u64;
+            Self {
+                packet: value,
+                recv_time: now,
+            }
+        }
+    }
+
+    impl PacketDown {
+        pub fn gateway(&self) -> String {
+            match self {
+                Self::JoinAccept(pr_start) => pr_start.dl_meta_data.fns_ul_token.gateway.clone(),
+                Self::Downlink(xmit) => xmit.dl_meta_data.fns_ul_token.gateway.clone(),
+            }
+        }
+        pub fn transaction_id(&self) -> u64 {
+            match self {
+                Self::JoinAccept(pr_start) => pr_start.transaction_id,
+                Self::Downlink(xmit) => xmit.transaction_id,
+            }
+        }
+
+        pub fn payload(&self) -> Vec<u8> {
+            hex::decode(match self {
+                PacketDown::JoinAccept(inner) => inner.phy_payload.clone(),
+                PacketDown::Downlink(inner) => inner.phy_payload.clone(),
+            })
+            .expect("hex decode downlink payload")
+        }
+
+        fn to_windows(&self) -> Result<(Option<WindowV1>, Option<WindowV1>)> {
+            match (self.rx1(), self.rx2()) {
+                (None, None) => anyhow::bail!("downlink contains no rx windows"),
+                windows => Ok(windows),
+            }
+        }
+
+        fn rx1(&self) -> Option<WindowV1> {
+            match self {
+                PacketDown::JoinAccept(value) => {
+                    let freq1 = value.dl_meta_data.dl_freq_1;
+                    let freq1 = (freq1 * 1_000_000.0) as u32; // mHz -> Hz
+                    Some(WindowV1 {
+                        timestamp: ((value.dl_meta_data.fns_ul_token.timestamp + 5_000_000) as u32)
+                            as u64,
+                        datarate: value.dl_meta_data.data_rate_1.into(),
+                        frequency: freq1,
+                        immediate: false,
+                    })
+                }
+                PacketDown::Downlink(value) => {
+                    let freq1 = value.dl_meta_data.dl_freq_1;
+                    let freq1 = (freq1 * 1_000_000.0) as u32; // mHz -> Hz
+                    Some(WindowV1 {
+                        timestamp: ((value.dl_meta_data.fns_ul_token.timestamp + 5_000_000) as u32)
+                            as u64,
+                        datarate: value.dl_meta_data.data_rate_1.into(),
+                        frequency: freq1,
+                        immediate: false,
+                    })
+                }
+            }
+        }
+
+        fn rx2(&self) -> Option<WindowV1> {
+            match self {
+                PacketDown::JoinAccept(value) => {
+                    let freq2 = value.dl_meta_data.dl_freq_2;
+                    let freq2 = (freq2 * 1_000_000.0) as u32; // mHz -> Hz
+                    Some(WindowV1 {
+                        timestamp: ((value.dl_meta_data.fns_ul_token.timestamp + 6_000_000) as u32)
+                            as u64,
+                        datarate: value.dl_meta_data.data_rate_2.into(),
+                        frequency: freq2,
+                        immediate: false,
+                    })
+                }
+                PacketDown::Downlink(_value) => None,
+            }
+        }
+
+        pub fn packet_down(self) -> PacketRouterPacketDownV1 {
+            self.into()
+        }
+
+        pub fn as_ref(&self) -> &Self {
+            self
+        }
+    }
+
+    impl From<PRStartAnsDownlink> for PacketDown {
+        fn from(value: PRStartAnsDownlink) -> Self {
+            Self::JoinAccept(Box::new(value))
+        }
+    }
+
+    impl From<XmitDataReq> for PacketDown {
+        fn from(value: XmitDataReq) -> Self {
+            Self::Downlink(Box::new(value))
+        }
+    }
+
+    impl From<PacketDown> for PacketRouterPacketDownV1 {
+        fn from(value: PacketDown) -> Self {
+            let (rx1, rx2) = value.to_windows().expect("valid rx windows");
+            Self {
+                payload: value.payload(),
+                rx1,
+                rx2,
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub enum RoutingInfo {
+        Eui { app: Eui, dev: Eui },
+        DevAddr(DevAddr),
+        Unknown,
+    }
+
+    impl RoutingInfo {
+        pub fn eui(app: EUI64<&[u8]>, dev: EUI64<&[u8]>) -> Self {
+            Self::Eui {
+                app: EUI64::new(flip_endianness(app.as_ref()))
+                    .unwrap()
+                    .to_string(),
+                dev: EUI64::new(flip_endianness(dev.as_ref()))
+                    .unwrap()
+                    .to_string(),
+            }
+        }
+        pub fn devaddr(devaddr: DevAddr) -> Self {
+            Self::DevAddr(devaddr)
+        }
+    }
+
+    fn flip_endianness(slice: &[u8]) -> Vec<u8> {
+        let mut flipped = Vec::with_capacity(slice.len());
+        for &byte in slice.iter().rev() {
+            flipped.push(byte);
+        }
+        flipped
+    }
+
+    #[cfg(test)]
     mod test {
-        #![allow(unused_imports)]
-        use crate::packet_info::RoutingInfo;
+        use crate::packet::RoutingInfo;
         use lorawan::parser::PhyPayload;
 
         #[test]
@@ -558,7 +633,7 @@ mod packet_info {
                         app: "0000000000000000".to_string(),
                         dev: "0000000000000003".to_string()
                     },
-                    RoutingInfo::new_eui(request.app_eui(), request.dev_eui())
+                    RoutingInfo::eui(request.app_eui(), request.dev_eui())
                 );
             } else {
                 assert!(false);
@@ -568,29 +643,22 @@ mod packet_info {
 }
 
 mod deduplicator {
-    use crate::{packet_info::PacketHash, server::MsgSender};
-    use helium_proto::services::router::PacketRouterPacketUpV1;
-    use std::{collections::HashMap, time::Duration};
+    use crate::packet::{PacketHash, PacketUp};
+    use std::collections::HashMap;
 
     pub struct Deduplicator {
-        // The store of packets
-        packets: HashMap<PacketHash, Vec<PacketRouterPacketUpV1>>,
-        // Where to send collections of packets that have gone through the dedupe cycle.
-        sender: MsgSender,
-        /// DedupWindow from Http Roaming Spec
-        dedupe_timeout: Duration,
-        /// How long to wait before clearing out a packet hash.
-        /// This will impact if you receive duplicate packets if set too short.
-        cleanup_timeout: Duration,
+        packets: HashMap<PacketHash, Vec<PacketUp>>,
+    }
+
+    pub enum HandlePacket {
+        New(PacketHash),
+        Existing,
     }
 
     impl Deduplicator {
-        pub fn new(sender: MsgSender, dedupe_timeout: Duration, cleanup_timeout: Duration) -> Self {
+        pub fn new() -> Self {
             Self {
                 packets: HashMap::new(),
-                sender,
-                dedupe_timeout,
-                cleanup_timeout,
             }
         }
 
@@ -598,85 +666,67 @@ mod deduplicator {
         /// - Insert the packet to collect the rest.
         /// - Wait for the DedupWindow, then ask for the packet to be sent.
         /// - Wait for the cleanupWindow, then remove all copies of the packet.
-        pub fn handle_packet(&mut self, packet: PacketRouterPacketUpV1) {
+        pub fn handle_packet(&mut self, packet: impl Into<PacketUp>) -> HandlePacket {
+            let mut result = HandlePacket::Existing;
+            let packet = packet.into();
+            let hash = packet.hash();
             self.packets
-                .entry(self.hash(&packet))
+                .entry(hash.clone())
                 .and_modify(|bucket| bucket.push(packet.clone()))
-                .or_insert_with_key(|key| {
-                    let sender = self.sender.clone();
-                    let key = key.to_owned();
-                    let dedupe_timeout = self.dedupe_timeout;
-                    let cleanup_timeout = self.cleanup_timeout;
-                    tokio::spawn(async move {
-                        tokio::time::sleep(dedupe_timeout).await;
-                        sender.dedup_done(key.clone()).await;
-                        tokio::time::sleep(cleanup_timeout).await;
-                        sender.dedup_cleanup(key).await;
-                    });
+                .or_insert_with(|| {
+                    result = HandlePacket::New(hash);
                     vec![packet]
                 });
+            result
         }
 
-        pub fn get_packets(&mut self, hash: &String) -> Vec<PacketRouterPacketUpV1> {
+        pub fn get_packets(&self, hash: &PacketHash) -> Vec<PacketUp> {
             self.packets
                 .get(hash)
                 .expect("packets exist for hash")
                 .to_owned()
         }
 
-        pub fn remove_packets(&mut self, hash: &String) {
+        pub fn remove_packets(&mut self, hash: &PacketHash) {
             self.packets.remove(hash);
-        }
-
-        pub fn hash(&self, packet: &PacketRouterPacketUpV1) -> String {
-            use sha2::{Digest, Sha256};
-            String::from_utf8_lossy(&Sha256::digest(&packet.payload)).into()
         }
     }
 }
 
 mod http {
-    use std::collections::HashMap;
-
-    use crate::server::{MsgSender, Token};
+    use crate::{
+        actions::MsgSender,
+        grpc::GatewayID,
+        packet::{PacketUp, RoutingInfo},
+        Config, Result,
+    };
     use axum::{
-        body::Bytes,
         extract,
         response::IntoResponse,
         routing::{get, post, Router},
         Extension,
     };
-    use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
+    use hex::FromHex;
     use reqwest::StatusCode;
+    use std::{collections::HashMap, net::SocketAddr};
     use tracing::instrument;
 
+    type TransactionID = u64;
+
     #[instrument]
-    pub fn start(sender: MsgSender) -> tokio::task::JoinHandle<()> {
+    pub fn start(sender: MsgSender, addr: SocketAddr) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let app = Router::new()
                 .route("/api/downlink", post(downlink_post))
-                .route("/*key", post(catchall_post))
-                .route("/", post(catchall_post))
-                .route(
-                    "/health",
-                    get(|| async {
-                        tracing::info!("health check");
-                        "ok"
-                    }),
-                )
+                .route("/health", get(|| async { "ok" }))
                 .layer(Extension(sender));
 
-            let addr = "0.0.0.0:9002".parse().expect("valid serve addr");
-            tracing::info!(addr = "0.0.0.0:9002", "setup");
+            tracing::debug!(?addr, "setup");
             axum::Server::bind(&addr)
                 .serve(app.into_make_service())
                 .await
                 .expect("serve http");
         })
-    }
-
-    async fn catchall_post(_sender: Extension<MsgSender>, body: Bytes) -> impl IntoResponse {
-        tracing::info!(?body, "catch all request");
     }
 
     async fn downlink_post(
@@ -686,25 +736,115 @@ mod http {
         tracing::info!(?downlink, "http downlink");
         match serde_json::from_value::<PRStartAnsDownlink>(downlink.clone()) {
             Ok(pr_start) => {
-                sender.join_accept_downlink(pr_start).await;
-                (StatusCode::ACCEPTED, "Downlink Accepted")
+                sender.downlink(pr_start).await;
+                (StatusCode::ACCEPTED, "Join Accept")
             }
             Err(_) => match serde_json::from_value::<PRStartAnsPlain>(downlink.clone()) {
                 Ok(_plain) => (StatusCode::ACCEPTED, "Answer Accepted"),
                 Err(_) => match serde_json::from_value::<XmitDataReq>(downlink) {
                     Ok(xmit) => {
-                        sender.data_downlink(xmit).await;
-                        (StatusCode::ACCEPTED, "Xmit Accepted")
+                        sender.downlink(xmit).await;
+                        (StatusCode::ACCEPTED, "XmitReq")
                     }
                     Err(_) => {
-                        tracing::error!(
-                            "could not make pr_start_ans or xmit_data_req from downlink"
-                        );
-                        (StatusCode::BAD_REQUEST, "unknown")
+                        tracing::error!("could not make pr_start_ans or xmit_data_req");
+                        (StatusCode::BAD_REQUEST, "Nnknown")
                     }
                 },
             },
         }
+    }
+
+    pub fn make_pr_start_notif(transaction_id: TransactionID, http_config: &Config) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "ProtocolVersion": "1.1",
+            "SenderID": http_config.helium_net_id,
+            "ReceiverID": http_config.target_net_id,
+            "TransactionID": transaction_id,
+            "MessageType": "PRStartNotif",
+            "SenderNSID": http_config.sender_nsid,
+            "ReceiverNSID": http_config.receiver_nsid,
+            "Result": {"ResultCode": "Success"}
+        }))
+        .expect("pr_start_notif json")
+    }
+
+    pub fn make_xmit_data_ans(xmit: &XmitDataReq, http_config: &Config) -> String {
+        serde_json::to_string(&serde_json::json!({
+            "ProtocolVersion": "1.1",
+            "MessageType": "XmitDataAns",
+            "SenderID": http_config.helium_net_id,
+            "ReceiverID": http_config.target_net_id,
+            "SenderNSID": http_config.sender_nsid,
+            "ReceiverNSID": http_config.receiver_nsid,
+            "TransactionID": xmit.transaction_id,
+            "Result": {"ResultCode": "Success"},
+            "DLFreq1": xmit.dl_meta_data.dl_freq_1
+        }))
+        .expect("xmit_data_ans json")
+    }
+
+    pub fn make_pr_start_req(packets: Vec<PacketUp>, config: &Config) -> Result<String> {
+        let packet = packets.first().expect("at least one packet");
+
+        let (routing_key, routing_value) = match packet.routing_info() {
+            RoutingInfo::Eui { dev, .. } => ("DevEUI", dev),
+            RoutingInfo::DevAddr(devaddr) => ("DevAddr", devaddr),
+            RoutingInfo::Unknown => todo!("should never get here"),
+        };
+
+        let mut gw_info = vec![];
+        for packet in packets.iter() {
+            gw_info.push(serde_json::json!({
+                "ID": packet.gateway_mac_str(),
+                "RFRegion": packet.region(),
+                "RSSI": packet.rssi(),
+                "SNR": packet.snr(),
+                "DLAllowed": true
+            }));
+        }
+
+        Ok(serde_json::to_string(&serde_json::json!({
+            "ProtocolVersion" : "1.1",
+            "MessageType": "PRStartReq",
+            "SenderNSID": config.sender_nsid,
+            "ReceiverNSID": config.receiver_nsid,
+            "DedupWindowSize": config.dedupe_window.to_string(),
+            "SenderID": config.helium_net_id,
+            "ReceiverID": config.target_net_id,
+            "PHYPayload": packet.json_payload(),
+            "ULMetaData": {
+                routing_key: routing_value,
+                "DataRate": packet.datarate_index(),
+                "ULFreq": packet.frequency_mhz(),
+                "RecvTime": packet.recv_time(),
+                "RFRegion": packet.region(),
+                "FNSULToken": make_token(packet.gateway_b58(), packet.timestamp()),
+                "GWCnt": packets.len(),
+                "GWInfo": gw_info
+            }
+        }))
+        .expect("pr_start_req json"))
+    }
+
+    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+    pub struct Token {
+        pub timestamp: u64,
+        pub gateway: GatewayID,
+    }
+
+    impl FromHex for Token {
+        type Error = anyhow::Error;
+
+        fn from_hex<T: AsRef<[u8]>>(hex: T) -> std::result::Result<Self, Self::Error> {
+            let s = hex::decode(hex).unwrap();
+            Ok(serde_json::from_slice(&s[..]).unwrap())
+        }
+    }
+
+    fn make_token(gateway: GatewayID, timestamp: u64) -> String {
+        let token = Token { gateway, timestamp };
+        hex::encode(serde_json::to_string(&token).unwrap())
     }
 
     #[derive(Debug, Clone, serde::Deserialize)]
@@ -749,32 +889,6 @@ mod http {
     pub struct GWInfo {
         #[serde(rename = "ULToken")]
         pub ul_token: Option<String>,
-    }
-
-    impl From<&XmitDataReq> for PacketRouterPacketDownV1 {
-        fn from(value: &XmitDataReq) -> Self {
-            let freq = value.dl_meta_data.dl_freq_1;
-            let freq = (freq * 1_000_000.0) as u32; // mHz -> Hz
-            let payload =
-                hex::decode(value.phy_payload.clone()).expect("hex decode downlink payload");
-            tracing::info!(
-                before = ?value.phy_payload,
-                after = ?payload,
-                "to packet down"
-            );
-            Self {
-                payload,
-                rx1: Some(WindowV1 {
-                    timestamp: ((value.dl_meta_data.fns_ul_token.timestamp
-                        + (value.dl_meta_data.rx_delay_1 as u64 * 1_000_000))
-                        as u32) as u64,
-                    datarate: value.dl_meta_data.data_rate_1.into(),
-                    frequency: freq,
-                    immediate: false,
-                }),
-                rx2: None,
-            }
-        }
     }
 
     #[derive(Debug, Clone, serde::Deserialize)]
@@ -855,41 +969,14 @@ mod http {
         pub hi_priority_flag: bool,
     }
 
-    impl From<&PRStartAnsDownlink> for PacketRouterPacketDownV1 {
-        fn from(value: &PRStartAnsDownlink) -> Self {
-            let freq1 = value.dl_meta_data.dl_freq_1;
-            let freq1 = (freq1 * 1_000_000.0) as u32; // mHz -> Hz
-
-            let freq2 = value.dl_meta_data.dl_freq_2;
-            let freq2 = (freq2 * 1_000_000.0) as u32; // mHz -> Hz
-
-            let payload =
-                hex::decode(value.phy_payload.clone()).expect("hex decode downlink payload");
-            Self {
-                payload,
-                rx1: Some(WindowV1 {
-                    timestamp: ((value.dl_meta_data.fns_ul_token.timestamp + 5_000_000) as u32)
-                        as u64,
-                    datarate: value.dl_meta_data.data_rate_1.into(),
-                    frequency: freq1,
-                    immediate: false,
-                }),
-                rx2: Some(WindowV1 {
-                    timestamp: ((value.dl_meta_data.fns_ul_token.timestamp + 6_000_000) as u32)
-                        as u64,
-                    datarate: value.dl_meta_data.data_rate_2.into(),
-                    frequency: freq2,
-                    immediate: false,
-                }),
-            }
-        }
-    }
-
+    #[cfg(test)]
     mod test {
-        #![allow(unused)]
         use super::PRStartAnsPlain;
-        use crate::http::{PRStartAnsDownlink, XmitDataReq};
-        use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
+        use crate::{
+            http::{PRStartAnsDownlink, XmitDataReq},
+            packet::PacketDown,
+        };
+        use helium_proto::services::router::PacketRouterPacketDownV1;
 
         #[test]
         fn xmit_data_req_to_packet_down_v1() {
@@ -924,8 +1011,9 @@ mod http {
                     "HiPriorityFlag":false}
                 }
             );
-            let packet: &XmitDataReq = &serde_json::from_value(value).unwrap();
-            println!("packet: {packet:#?}");
+            let xmit: XmitDataReq = serde_json::from_value(value).unwrap();
+            println!("xmit: {xmit:#?}");
+            let packet: PacketDown = xmit.into();
             let down: PacketRouterPacketDownV1 = packet.into();
             println!("down: {down:#?}");
         }
@@ -966,16 +1054,33 @@ mod http {
                 },
                 "DevAddr": "48000037"
             });
-            let packet: &PRStartAnsDownlink =
-                &serde_json::from_value(value).expect("to packet down");
-            println!("packet: {packet:#?}");
+            let pr_start: PRStartAnsDownlink =
+                serde_json::from_value(value).expect("to packet down");
+            println!("packet: {pr_start:#?}");
+            let packet: PacketDown = pr_start.into();
             let down: PacketRouterPacketDownV1 = packet.into();
             println!("down: {down:#?}");
         }
 
         #[test]
         fn mic_failed() {
-            let value = serde_json::json!({"ProtocolVersion":"1.1","SenderID":"000024","ReceiverID":"c00053","TransactionID":517448448,"MessageType":"PRStartAns","Result":{"ResultCode":"MICFailed","Description":"Invalid MIC"},"Lifetime":null,"FNwkSIntKey":null,"NwkSKey":null,"FCntUp":null,"ServiceProfile":null,"DLMetaData":null});
+            let value = serde_json::json!({
+                "ProtocolVersion": "1.1",
+                "SenderID": "000024",
+                "ReceiverID": "c00053",
+                "TransactionID": 517448448,
+                "MessageType": "PRStartAns",
+                "Result": {
+                    "ResultCode": "MICFailed",
+                    "Description": "Invalid MIC"
+                },
+                "Lifetime": null,
+                "FNwkSIntKey": null,
+                "NwkSKey": null,
+                "FCntUp": null,
+                "ServiceProfile": null,
+                "DLMetaData": null
+            });
             let packet: PRStartAnsPlain = serde_json::from_value(value).expect("to pr plain");
             println!("plain: {packet:#?}");
         }
@@ -983,29 +1088,42 @@ mod http {
 }
 
 mod grpc {
+    use std::net::SocketAddr;
 
-    use crate::server::MsgSender;
-    use crate::{packet_info::PacketMeta, server::GatewayTx};
+    use crate::{actions::MsgSender, packet::PacketUp, Result};
     use helium_proto::services::router::{
-        envelope_up_v1, packet_server::Packet, packet_server::PacketServer, EnvelopeDownV1,
-        EnvelopeUpV1,
+        envelope_down_v1, envelope_up_v1, packet_server::Packet, packet_server::PacketServer,
+        EnvelopeDownV1, EnvelopeUpV1, PacketRouterPacketDownV1,
     };
+    use tokio::sync::mpsc::Sender;
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::{Request, Response, Status, Streaming};
     use tracing::instrument;
 
-    type Result<T = (), E = anyhow::Error> = anyhow::Result<T, E>;
-
     #[instrument]
-    pub fn start(sender: MsgSender) -> tokio::task::JoinHandle<()> {
+    pub fn start(sender: MsgSender, addr: SocketAddr) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
-            let addr = "0.0.0.0:9000".parse().expect("valid serve addr");
             tonic::transport::Server::builder()
                 .add_service(PacketServer::new(Gateways::new(sender)))
                 .serve(addr)
                 .await
                 .unwrap();
         })
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct GatewayTx(pub Sender<Result<EnvelopeDownV1, Status>>);
+    pub type GatewayID = String;
+
+    impl GatewayTx {
+        pub async fn send_downlink(&self, downlink: impl Into<PacketRouterPacketDownV1>) {
+            let _ = self
+                .0
+                .send(Ok(EnvelopeDownV1 {
+                    data: Some(envelope_down_v1::Data::Packet(downlink.into())),
+                }))
+                .await;
+        }
     }
 
     #[derive(Debug)]
@@ -1034,16 +1152,17 @@ mod grpc {
             tracing::info!("connection");
 
             tokio::spawn(async move {
-                let mut gateway = None;
+                let mut gateway_b58 = None;
                 while let Ok(Some(msg)) = req.message().await {
                     if let Some(envelope_up_v1::Data::Packet(packet)) = msg.data {
-                        if gateway.is_none() {
+                        let packet: PacketUp = packet.into();
+                        if gateway_b58.is_none() {
                             sender
                                 .gateway_connect(&packet, GatewayTx(downlink_sender.clone()))
                                 .await;
-                            gateway = Some(packet.gateway_b58())
+                            gateway_b58 = Some(packet.gateway_b58())
                         }
-                        sender.uplink(packet).await;
+                        sender.uplink_receive(packet).await;
                     } else {
                         tracing::warn!(?msg.data, "ignoring message");
                     }
@@ -1051,7 +1170,7 @@ mod grpc {
 
                 tracing::info!("gateway went down");
                 sender
-                    .gateway_disconnect(gateway.expect("packet was sent by gateway"))
+                    .gateway_disconnect(gateway_b58.expect("packet was sent by gateway"))
                     .await;
             });
 
