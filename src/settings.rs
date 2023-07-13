@@ -4,6 +4,32 @@ use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]
 pub struct Settings {
+    /// Roaming settings
+    #[command(flatten)]
+    pub roaming: RoamingSettings,
+    /// Network options
+    #[command(flatten)]
+    pub network: NetworkSettings,
+
+    /// How long before Packets are cleaned out of being deduplicated in duration time.
+    #[arg(long, default_value = "10s")]
+    pub cleanup_window: DurationString,
+
+    /// Send PRStartNotif message after sending Downlink to gateway.
+    /// Chirpstack does nothing with the notif message and returns an 400.
+    #[arg(long, default_value = "false")]
+    pub send_pr_start_notif: bool,
+}
+
+#[derive(Debug, Clone, clap::Args, serde::Deserialize)]
+pub struct RoamingSettings {
+    /// Helium forwarding NetID, for LNSs to identify which network to back through for downlinking.
+    /// (default: C00053)
+    #[arg(long, default_value = "C00053")]
+    pub helium_net_id: String,
+    /// NetID of the network operating the http forwarder
+    #[arg(long, default_value = "000000")]
+    pub target_net_id: String,
     /// Identity of the this NS, unique to HTTP forwarder
     #[arg(long, default_value = "6081FFFE12345678")]
     pub sender_nsid: String,
@@ -13,20 +39,10 @@ pub struct Settings {
     /// How long were the packets held in duration time (1250ms, 1.2s)
     #[arg(long, default_value = "1250ms")]
     pub dedup_window: DurationString,
-    /// How long before Packets are cleaned out of being deduplicated in duration time.
-    #[arg(long, default_value = "10s")]
-    pub cleanup_window: DurationString,
-    /// Helium forwarding NetID, for LNSs to identify which network to back through for downlinking.
-    /// (default: C00053)
-    #[arg(long, default_value = "C00053")]
-    pub helium_net_id: String,
-    /// NetID of the network operating the http forwarder
-    #[arg(long, default_value = "000000")]
-    pub target_net_id: String,
-    /// Send PRStartNotif message after sending Downlink to gateway.
-    /// Chirpstack does nothing with the notif message and returns an 400.
-    #[arg(long, default_value = "false")]
-    pub send_pr_start_notif: bool,
+}
+
+#[derive(Debug, Clone, clap::Args, serde::Deserialize)]
+pub struct NetworkSettings {
     /// LNS Endpoint
     #[arg(long, default_value = "http://localhost:9005")]
     pub lns_endpoint: String,

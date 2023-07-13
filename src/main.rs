@@ -46,10 +46,10 @@ async fn main() {
 }
 
 pub async fn run(settings: Settings) {
-    let http_listen_addr = settings.downlink_listen;
-    let grpc_listen_addr = settings.uplink_listen;
-    let outgoing_addr = settings.lns_endpoint.clone();
-    let dedup_window = settings.dedup_window;
+    let http_listen_addr = settings.network.downlink_listen;
+    let grpc_listen_addr = settings.network.uplink_listen;
+    let outgoing_addr = settings.network.lns_endpoint.clone();
+    let dedup_window = settings.roaming.dedup_window;
 
     tracing::info!("=====================================");
     tracing::info!("uplink listen   :: {grpc_listen_addr}");
@@ -159,7 +159,7 @@ mod app {
         downlink,
         downlink::PacketDown,
         settings::Settings,
-        uplink::{PacketHash, GatewayB58},
+        uplink::{GatewayB58, PacketHash},
         uplink_ingest::GatewayTx,
     };
     use std::collections::HashMap;
@@ -211,7 +211,7 @@ mod app {
         match action {
             UpdateAction::Noop => {}
             UpdateAction::StartTimerForNewPacket(hash) => {
-                let dedup = app.settings.dedup_window.into();
+                let dedup = app.settings.roaming.dedup_window.into();
                 let cleanup = app.settings.cleanup_window.into();
                 let sender = app.message_tx.clone();
                 tokio::spawn(async move {
@@ -227,9 +227,9 @@ mod app {
                 gw.send_downlink(downlink.to_packet_down()).await;
                 tracing::info!(gw = gateway_name, "downlink sent");
 
-                if let Some(body) = downlink.http_body(&app.settings) {
+                if let Some(body) = downlink.http_body(&app.settings.roaming) {
                     let res = reqwest::Client::new()
-                        .post(app.settings.lns_endpoint.clone())
+                        .post(app.settings.network.lns_endpoint.clone())
                         .body(body.clone())
                         .send()
                         .await;
@@ -238,7 +238,7 @@ mod app {
             }
             UpdateAction::SendUplink(body) => {
                 let res = reqwest::Client::new()
-                    .post(app.settings.lns_endpoint.clone())
+                    .post(app.settings.network.lns_endpoint.clone())
                     .body(body.clone())
                     .send()
                     .await;
@@ -256,7 +256,7 @@ mod app {
             Msg::UplinkSend(packet_hash) => {
                 let packets = app.deduplicator.get_packets(&packet_hash);
                 tracing::info!(num_packets = packets.len(), "deduplication done");
-                match downlink::make_pr_start_req(packets, &app.settings) {
+                match downlink::make_pr_start_req(packets, &app.settings.roaming) {
                     Ok(body) => UpdateAction::SendUplink(body),
                     Err(_) => {
                         tracing::warn!("ignoring invalid packet");

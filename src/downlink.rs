@@ -1,5 +1,5 @@
 use crate::{
-    settings::Settings,
+    settings::RoamingSettings,
     uplink::{mhz_to_hz, GatewayB58, PacketUp, PacketUpTrait, RoutingInfo},
     Result,
 };
@@ -13,7 +13,7 @@ pub trait PacketDownTrait {
     fn gateway(&self) -> GatewayB58;
     fn to_packet_down(&self) -> PacketRouterPacketDownV1;
     fn transaction_id(&self) -> TransactionID;
-    fn http_body(&self, settings: &Settings) -> Option<String>;
+    fn http_body(&self, settings: &RoamingSettings) -> Option<String>;
 }
 
 pub type PacketDown = Box<dyn PacketDownTrait + Send + Sync>;
@@ -50,7 +50,7 @@ pub fn parse_http_payload(value: serde_json::Value) -> Result<HttpPayloadResp> {
 /// PRStartReq was a join_request,
 /// PRStartAns was a join_accept,
 /// PRStartNotif, the join_accept was forwarded to the gateway.
-pub fn make_pr_start_notif(transaction_id: TransactionID, http_config: &Settings) -> String {
+pub fn make_pr_start_notif(transaction_id: TransactionID, http_config: &RoamingSettings) -> String {
     serde_json::to_string(&serde_json::json!({
         "ProtocolVersion": "1.1",
         "SenderID": http_config.helium_net_id,
@@ -65,7 +65,7 @@ pub fn make_pr_start_notif(transaction_id: TransactionID, http_config: &Settings
 }
 
 /// Downlink was received and forwarded to the gateway.
-pub fn make_xmit_data_ans(xmit: &XmitDataReq, http_config: &Settings) -> String {
+pub fn make_xmit_data_ans(xmit: &XmitDataReq, http_config: &RoamingSettings) -> String {
     serde_json::to_string(&serde_json::json!({
         "ProtocolVersion": "1.1",
         "MessageType": "XmitDataAns",
@@ -81,7 +81,7 @@ pub fn make_xmit_data_ans(xmit: &XmitDataReq, http_config: &Settings) -> String 
 }
 
 /// Uplinks
-pub fn make_pr_start_req(packets: Vec<PacketUp>, config: &Settings) -> Result<String> {
+pub fn make_pr_start_req(packets: Vec<PacketUp>, config: &RoamingSettings) -> Result<String> {
     let packet = packets.first().expect("at least one packet");
 
     let (routing_key, routing_value) = match packet.routing_info() {
@@ -145,7 +145,7 @@ impl PacketDownTrait for PRStartAnsDownlink {
         self.transaction_id
     }
 
-    fn http_body(&self, settings: &Settings) -> Option<String> {
+    fn http_body(&self, settings: &RoamingSettings) -> Option<String> {
         Some(make_pr_start_notif(self.transaction_id, settings))
     }
 }
@@ -171,7 +171,7 @@ impl PacketDownTrait for XmitDataReq {
         self.transaction_id
     }
 
-    fn http_body(&self, settings: &Settings) -> Option<String> {
+    fn http_body(&self, settings: &RoamingSettings) -> Option<String> {
         Some(make_xmit_data_ans(self, settings))
     }
 }
