@@ -1,7 +1,4 @@
-use crate::{
-    actions::MsgSender,
-    roaming::{PRStartAnsDownlink, PRStartAnsPlain, XmitDataReq},
-};
+use crate::{actions::MsgSender, downlink};
 use axum::{
     extract,
     response::IntoResponse,
@@ -33,23 +30,14 @@ async fn downlink_post(
     extract::Json(downlink): extract::Json<serde_json::Value>,
 ) -> impl IntoResponse {
     tracing::info!(?downlink, "http downlink");
-    match serde_json::from_value::<PRStartAnsDownlink>(downlink.clone()) {
-        Ok(pr_start) => {
-            sender.downlink(pr_start).await;
-            (StatusCode::ACCEPTED, "Join Accept")
-        }
-        Err(_) => match serde_json::from_value::<PRStartAnsPlain>(downlink.clone()) {
-            Ok(_plain) => (StatusCode::ACCEPTED, "Answer Accepted"),
-            Err(_) => match serde_json::from_value::<XmitDataReq>(downlink) {
-                Ok(xmit) => {
-                    sender.downlink(xmit).await;
-                    (StatusCode::ACCEPTED, "XmitReq")
-                }
-                Err(_) => {
-                    tracing::error!("could not make pr_start_ans or xmit_data_req");
-                    (StatusCode::BAD_REQUEST, "Nnknown")
-                }
-            },
+    match downlink::parse_http_payload(downlink) {
+        Ok(resp) => match resp {
+            downlink::HttpPayloadResp::Downlink(downlink) => {
+                sender.downlink(downlink).await;
+                (StatusCode::ACCEPTED, "Downlink Accepted")
+            }
+            downlink::HttpPayloadResp::Noop => (StatusCode::ACCEPTED, "Answer Accepted"),
         },
+        Err(_err) => (StatusCode::BAD_REQUEST, "Unknown"),
     }
 }

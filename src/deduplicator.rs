@@ -1,6 +1,5 @@
+use crate::uplink::{PacketHash, PacketUp, PacketUpTrait};
 use std::collections::HashMap;
-
-use crate::packet::{PacketHash, PacketUp};
 
 pub struct Deduplicator {
     packets: HashMap<PacketHash, Vec<PacketUp>>,
@@ -22,9 +21,8 @@ impl Deduplicator {
     /// - Insert the packet to collect the rest.
     /// - Wait for the DedupWindow, then ask for the packet to be sent.
     /// - Wait for the cleanupWindow, then remove all copies of the packet.
-    pub fn handle_packet(&mut self, packet: impl Into<PacketUp>) -> HandlePacket {
+    pub fn handle_packet(&mut self, packet: PacketUp) -> HandlePacket {
         let mut result = HandlePacket::Existing;
-        let packet = packet.into();
         let hash = packet.hash();
         self.packets
             .entry(hash.clone())

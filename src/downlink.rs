@@ -1,14 +1,55 @@
 use crate::{
-    packet::{PacketUp, RoutingInfo},
     settings::Settings,
-    uplink_ingest::GatewayID,
+    uplink::{mhz_to_hz, GatewayB58, PacketUp, PacketUpTrait, RoutingInfo},
     Result,
 };
+use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
 use hex::FromHex;
 use std::collections::HashMap;
 
-type TransactionID = u64;
+pub type TransactionID = u64;
 
+pub trait PacketDownTrait {
+    fn gateway(&self) -> GatewayB58;
+    fn to_packet_down(&self) -> PacketRouterPacketDownV1;
+    fn transaction_id(&self) -> TransactionID;
+    fn http_body(&self, settings: &Settings) -> Option<String>;
+}
+
+pub type PacketDown = Box<dyn PacketDownTrait + Send + Sync>;
+
+impl core::fmt::Debug for PacketDown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PacketDownTraitable")
+    }
+}
+
+#[derive(Debug)]
+pub enum HttpPayloadResp {
+    Downlink(Box<dyn PacketDownTrait + Send + Sync>),
+    Noop,
+}
+
+pub fn parse_http_payload(value: serde_json::Value) -> Result<HttpPayloadResp> {
+    use serde_json::from_value;
+
+    if let Ok(pr_start) = from_value::<PRStartAnsDownlink>(value.clone()) {
+        return Ok(HttpPayloadResp::Downlink(Box::new(pr_start)));
+    }
+    if let Ok(xmit) = from_value::<XmitDataReq>(value.clone()) {
+        return Ok(HttpPayloadResp::Downlink(Box::new(xmit)));
+    }
+    if let Ok(_plain) = from_value::<PRStartAnsPlain>(value.clone()) {
+        return Ok(HttpPayloadResp::Noop);
+    }
+
+    tracing::warn!(?value, "could not parse");
+    anyhow::bail!("unparseable message");
+}
+
+/// PRStartReq was a join_request,
+/// PRStartAns was a join_accept,
+/// PRStartNotif, the join_accept was forwarded to the gateway.
 pub fn make_pr_start_notif(transaction_id: TransactionID, http_config: &Settings) -> String {
     serde_json::to_string(&serde_json::json!({
         "ProtocolVersion": "1.1",
@@ -23,6 +64,7 @@ pub fn make_pr_start_notif(transaction_id: TransactionID, http_config: &Settings
     .expect("pr_start_notif json")
 }
 
+/// Downlink was received and forwarded to the gateway.
 pub fn make_xmit_data_ans(xmit: &XmitDataReq, http_config: &Settings) -> String {
     serde_json::to_string(&serde_json::json!({
         "ProtocolVersion": "1.1",
@@ -38,6 +80,7 @@ pub fn make_xmit_data_ans(xmit: &XmitDataReq, http_config: &Settings) -> String 
     .expect("xmit_data_ans json")
 }
 
+/// Uplinks
 pub fn make_pr_start_req(packets: Vec<PacketUp>, config: &Settings) -> Result<String> {
     let packet = packets.first().expect("at least one packet");
 
@@ -81,10 +124,105 @@ pub fn make_pr_start_req(packets: Vec<PacketUp>, config: &Settings) -> Result<St
     .expect("pr_start_req json"))
 }
 
+impl PacketDownTrait for PRStartAnsDownlink {
+    fn gateway(&self) -> GatewayB58 {
+        self.dl_meta_data.fns_ul_token.gateway.clone()
+    }
+
+    fn to_packet_down(&self) -> PacketRouterPacketDownV1 {
+        PacketRouterPacketDownV1 {
+            payload: self.phy_payload.clone().into(),
+            rx1: self
+                .dl_meta_data
+                .to_rx1_window(self.dl_meta_data.fns_ul_token.timestamp),
+            rx2: self
+                .dl_meta_data
+                .to_rx2_window(self.dl_meta_data.fns_ul_token.timestamp),
+        }
+    }
+
+    fn transaction_id(&self) -> TransactionID {
+        self.transaction_id
+    }
+
+    fn http_body(&self, settings: &Settings) -> Option<String> {
+        Some(make_pr_start_notif(self.transaction_id, settings))
+    }
+}
+
+impl PacketDownTrait for XmitDataReq {
+    fn gateway(&self) -> GatewayB58 {
+        self.dl_meta_data.fns_ul_token.gateway.clone()
+    }
+
+    fn to_packet_down(&self) -> PacketRouterPacketDownV1 {
+        PacketRouterPacketDownV1 {
+            payload: self.phy_payload.clone().into(),
+            rx1: self
+                .dl_meta_data
+                .to_rx1_window(self.dl_meta_data.fns_ul_token.timestamp),
+            rx2: self
+                .dl_meta_data
+                .to_rx2_window(self.dl_meta_data.fns_ul_token.timestamp),
+        }
+    }
+
+    fn transaction_id(&self) -> TransactionID {
+        self.transaction_id
+    }
+
+    fn http_body(&self, settings: &Settings) -> Option<String> {
+        Some(make_xmit_data_ans(self, settings))
+    }
+}
+
+/// Timestamp value needs to be truncated into u32 space
+fn add_delay(timestamp: u64, add: u64) -> u64 {
+    ((timestamp + add) as u32) as u64
+}
+
+impl PRStartAnsDLMetaData {
+    fn to_rx1_window(&self, timestamp: u64) -> Option<WindowV1> {
+        // Join 1 window
+        Some(WindowV1 {
+            timestamp: add_delay(timestamp, 5_000_000),
+            frequency: mhz_to_hz(self.dl_freq_1),
+            datarate: self.data_rate_1.into(),
+            immediate: false,
+        })
+    }
+
+    fn to_rx2_window(&self, timestamp: u64) -> Option<WindowV1> {
+        // Join 2 window
+        Some(WindowV1 {
+            timestamp: add_delay(timestamp, 6_000_000),
+            frequency: mhz_to_hz(self.dl_freq_2),
+            datarate: self.data_rate_2.into(),
+            immediate: false,
+        })
+    }
+}
+
+impl DLMetaData {
+    fn to_rx1_window(&self, timestamp: u64) -> Option<WindowV1> {
+        // Join 1 window
+        Some(WindowV1 {
+            timestamp: add_delay(timestamp, 5_000_000),
+            frequency: mhz_to_hz(self.dl_freq_1),
+            datarate: self.data_rate_1.into(),
+            immediate: false,
+        })
+    }
+
+    fn to_rx2_window(&self, _timestamp: u64) -> Option<WindowV1> {
+        None
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Token {
     pub timestamp: u64,
-    pub gateway: GatewayID,
+    pub gateway: GatewayB58,
 }
 
 impl FromHex for Token {
@@ -96,7 +234,7 @@ impl FromHex for Token {
     }
 }
 
-fn make_token(gateway: GatewayID, timestamp: u64) -> String {
+fn make_token(gateway: GatewayB58, timestamp: u64) -> String {
     let token = Token { gateway, timestamp };
     hex::encode(serde_json::to_string(&token).unwrap())
 }
@@ -226,11 +364,7 @@ pub struct PRStartAnsDLMetaData {
 #[cfg(test)]
 mod test {
     use super::PRStartAnsPlain;
-    use crate::{
-        packet::PacketDown,
-        roaming::{PRStartAnsDownlink, XmitDataReq},
-    };
-    use helium_proto::services::router::PacketRouterPacketDownV1;
+    use crate::downlink::{parse_http_payload, PRStartAnsDownlink};
 
     #[test]
     fn xmit_data_req_to_packet_down_v1() {
@@ -265,11 +399,14 @@ mod test {
                 "HiPriorityFlag":false}
             }
         );
-        let xmit: XmitDataReq = serde_json::from_value(value).unwrap();
-        println!("xmit: {xmit:#?}");
-        let packet: PacketDown = xmit.into();
-        let down: PacketRouterPacketDownV1 = packet.into();
-        println!("down: {down:#?}");
+        let x = parse_http_payload(value).expect("parseable");
+        println!("{x:?}");
+
+        // let xmit: XmitDataReq = serde_json::from_value(value).unwrap();
+        // println!("xmit: {xmit:#?}");
+        // let packet: PacketDown = xmit.into();
+        // let down: PacketRouterPacketDownV1 = packet.into();
+        // println!("down: {down:#?}");
     }
 
     #[test]
@@ -310,9 +447,9 @@ mod test {
         });
         let pr_start: PRStartAnsDownlink = serde_json::from_value(value).expect("to packet down");
         println!("packet: {pr_start:#?}");
-        let packet: PacketDown = pr_start.into();
-        let down: PacketRouterPacketDownV1 = packet.into();
-        println!("down: {down:#?}");
+        // let packet: PacketDown = pr_start.into();
+        // let down: PacketRouterPacketDownV1 = packet.into();
+        // println!("down: {down:#?}");
     }
 
     #[test]

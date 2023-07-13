@@ -1,6 +1,10 @@
 use std::{net::SocketAddr, time::Duration};
 
-use crate::{actions::MsgSender, packet::PacketUp, Result};
+use crate::{
+    actions::MsgSender,
+    uplink::{PacketUp, PacketUpTrait},
+    Result,
+};
 use helium_proto::services::router::{
     envelope_down_v1, envelope_up_v1, packet_server::Packet, packet_server::PacketServer,
     EnvelopeDownV1, EnvelopeUpV1, PacketRouterPacketDownV1,
@@ -23,7 +27,6 @@ pub fn start(sender: MsgSender, addr: SocketAddr) -> tokio::task::JoinHandle<()>
 
 #[derive(Debug, Clone)]
 pub struct GatewayTx(pub Sender<Result<EnvelopeDownV1, Status>>);
-pub type GatewayID = String;
 
 impl GatewayTx {
     pub async fn send_downlink(&self, downlink: PacketRouterPacketDownV1) {
@@ -87,13 +90,11 @@ impl Packet for Gateways {
                             if let Some(envelope_up_v1::Data::Packet(packet)) = env_up.data {
                                 let packet: PacketUp = packet.into();
                                 if gateway_b58.is_none() {
+                                    let b58 = packet.gateway_b58();
+                                    gateway_b58 = Some(b58.clone());
                                     sender
-                                        .gateway_connect(
-                                            &packet,
-                                            GatewayTx(downlink_sender.clone()),
-                                        )
+                                        .gateway_connect(b58, GatewayTx(downlink_sender.clone()))
                                         .await;
-                                    gateway_b58 = Some(packet.gateway_b58())
                                 }
                                 uplinks += 1;
                                 sender.uplink_receive(packet).await;

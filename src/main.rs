@@ -4,10 +4,10 @@ use settings::Settings;
 use std::path::PathBuf;
 
 mod deduplicator;
+mod downlink;
 mod downlink_ingest;
-mod packet;
-mod roaming;
 mod settings;
+mod uplink;
 mod uplink_ingest;
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
@@ -69,8 +69,9 @@ pub async fn run(settings: Settings) {
 
 mod actions {
     use crate::{
-        packet::{PacketDown, PacketHash, PacketUp},
-        uplink_ingest::{GatewayID, GatewayTx},
+        downlink::PacketDown,
+        uplink::{GatewayB58, PacketHash, PacketUp},
+        uplink_ingest::GatewayTx,
     };
     use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -99,9 +100,9 @@ mod actions {
         /// Downlink received for gateway from HTTP handler.
         Downlink(PacketDown),
         /// Gateway has Connected.
-        GatewayConnect(GatewayID, GatewayTx),
+        GatewayConnect(GatewayB58, GatewayTx),
         /// Gateway has Disconnected.
-        GatewayDisconnect(GatewayID),
+        GatewayDisconnect(GatewayB58),
     }
 
     impl MsgSender {
@@ -128,23 +129,23 @@ mod actions {
                 .expect("dedup_cleanup");
         }
 
-        pub async fn gateway_connect(&self, packet: &PacketUp, downlink_sender: GatewayTx) {
+        pub async fn gateway_connect(&self, gateway_b58: GatewayB58, downlink_sender: GatewayTx) {
             self.0
-                .send(Msg::GatewayConnect(packet.gateway_b58(), downlink_sender))
+                .send(Msg::GatewayConnect(gateway_b58, downlink_sender))
                 .await
                 .expect("gateway_connect");
         }
 
-        pub async fn gateway_disconnect(&self, gateway: GatewayID) {
+        pub async fn gateway_disconnect(&self, gateway: GatewayB58) {
             self.0
                 .send(Msg::GatewayDisconnect(gateway))
                 .await
                 .expect("gateway_disconnect");
         }
 
-        pub async fn downlink(&self, downlink: impl Into<PacketDown>) {
+        pub async fn downlink(&self, downlink: PacketDown) {
             self.0
-                .send(Msg::Downlink(downlink.into()))
+                .send(Msg::Downlink(downlink))
                 .await
                 .expect("downlink");
         }
@@ -155,26 +156,28 @@ mod app {
     use crate::{
         actions::{Msg, MsgSender},
         deduplicator::{Deduplicator, HandlePacket},
-        packet::{PacketDown, PacketHash},
-        roaming,
+        downlink,
+        downlink::PacketDown,
         settings::Settings,
-        uplink_ingest::{GatewayID, GatewayTx},
+        uplink::{PacketHash, GatewayB58},
+        uplink_ingest::GatewayTx,
     };
     use std::collections::HashMap;
     use tokio::sync::mpsc::Receiver;
 
     pub struct App {
         deduplicator: Deduplicator,
-        gateway_map: HashMap<GatewayID, GatewayTx>,
+        gateway_map: HashMap<GatewayB58, GatewayTx>,
         settings: Settings,
         message_tx: MsgSender,
         message_rx: Receiver<Msg>,
     }
 
+    /// After updating app state, these are the side effects that can happen.
     pub enum UpdateAction {
         Noop,
         StartTimerForNewPacket(PacketHash),
-        SendDownlink(GatewayTx, PacketDown, Option<String>),
+        SendDownlink(GatewayTx, PacketDown),
         SendUplink(String),
     }
 
@@ -219,12 +222,12 @@ mod app {
                     sender.uplink_cleanup(hash).await;
                 });
             }
-            UpdateAction::SendDownlink(gw, downlink, http) => {
+            UpdateAction::SendDownlink(gw, downlink) => {
                 let gateway_name = downlink.gateway();
-                gw.send_downlink(downlink.into()).await;
+                gw.send_downlink(downlink.to_packet_down()).await;
                 tracing::info!(gw = gateway_name, "downlink sent");
 
-                if let Some(body) = http {
+                if let Some(body) = downlink.http_body(&app.settings) {
                     let res = reqwest::Client::new()
                         .post(app.settings.lns_endpoint.clone())
                         .body(body.clone())
@@ -253,7 +256,7 @@ mod app {
             Msg::UplinkSend(packet_hash) => {
                 let packets = app.deduplicator.get_packets(&packet_hash);
                 tracing::info!(num_packets = packets.len(), "deduplication done");
-                match roaming::make_pr_start_req(packets, &app.settings) {
+                match downlink::make_pr_start_req(packets, &app.settings) {
                     Ok(body) => UpdateAction::SendUplink(body),
                     Err(_) => {
                         tracing::warn!("ignoring invalid packet");
@@ -267,30 +270,12 @@ mod app {
             }
             Msg::Downlink(source) => {
                 let gw = source.gateway();
-                let transaction_id = source.transaction_id();
                 match app.gateway_map.get(&gw) {
                     None => {
                         tracing::warn!(?gw, "join accept for unknown gateway");
                         UpdateAction::Noop
                     }
-                    Some(gateway) => match source.as_ref() {
-                        PacketDown::JoinAccept(_) => {
-                            let http = if app.settings.send_pr_start_notif {
-                                tracing::debug!("http notif");
-                                let body =
-                                    roaming::make_pr_start_notif(transaction_id, &app.settings);
-                                Some(body)
-                            } else {
-                                None
-                            };
-                            UpdateAction::SendDownlink(gateway.clone(), source, http)
-                        }
-                        PacketDown::Downlink(xmit) => {
-                            let body = roaming::make_xmit_data_ans(xmit, &app.settings);
-                            tracing::debug!("http xmit ans");
-                            UpdateAction::SendDownlink(gateway.clone(), source, Some(body))
-                        }
-                    },
+                    Some(gateway) => UpdateAction::SendDownlink(gateway.clone(), source),
                 }
             }
             Msg::GatewayConnect(gw, sender) => {
