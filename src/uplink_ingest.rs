@@ -7,7 +7,7 @@ use crate::{
 };
 use helium_proto::services::router::{
     envelope_down_v1, envelope_up_v1, packet_server::Packet, packet_server::PacketServer,
-    EnvelopeDownV1, EnvelopeUpV1, PacketRouterPacketDownV1,
+    EnvelopeDownV1, EnvelopeUpV1, PacketRouterPacketDownV1, PacketRouterPacketUpV1,
 };
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
@@ -25,6 +25,17 @@ pub fn start(sender: MsgSender, addr: SocketAddr) -> tokio::task::JoinHandle<()>
     })
 }
 
+#[derive(Debug)]
+struct Gateways {
+    sender: MsgSender,
+}
+
+impl Gateways {
+    pub fn new(sender: MsgSender) -> Self {
+        Self { sender }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GatewayTx(pub Sender<Result<EnvelopeDownV1, Status>>);
 
@@ -36,17 +47,6 @@ impl GatewayTx {
                 data: Some(envelope_down_v1::Data::Packet(downlink)),
             }))
             .await;
-    }
-}
-
-#[derive(Debug)]
-struct Gateways {
-    sender: MsgSender,
-}
-
-impl Gateways {
-    pub fn new(sender: MsgSender) -> Self {
-        Self { sender }
     }
 }
 
@@ -115,5 +115,16 @@ impl Packet for Gateways {
         });
 
         Ok(Response::new(ReceiverStream::new(downlink_receiver)))
+    }
+}
+
+impl From<PacketRouterPacketUpV1> for PacketUp {
+    fn from(value: PacketRouterPacketUpV1) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        Self::new(value, now)
     }
 }

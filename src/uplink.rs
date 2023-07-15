@@ -5,6 +5,31 @@ use helium_proto::services::router::PacketRouterPacketUpV1;
 use lorawan::parser::EUI64;
 use lorawan::parser::{DataHeader, PhyPayload};
 
+#[derive(Debug, PartialEq, Eq, Hash, Clone)]
+pub struct PacketHash(pub String);
+pub type Eui = String;
+pub type DevAddr = String;
+pub type GatewayB58 = String;
+
+#[derive(Debug, Clone)]
+pub struct PacketUp {
+    packet: PacketRouterPacketUpV1,
+    recv_time: u64,
+}
+
+impl PacketUp {
+    pub fn new(packet: PacketRouterPacketUpV1, recv_time: u64) -> Self {
+        Self { packet, recv_time }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum RoutingInfo {
+    Eui { app: Eui, dev: Eui },
+    DevAddr(DevAddr),
+    Unknown,
+}
+
 pub trait PacketUpTrait {
     fn gateway_b58(&self) -> GatewayB58;
     fn hash(&self) -> PacketHash;
@@ -19,12 +44,6 @@ pub trait PacketUpTrait {
     fn recv_time(&self) -> String;
     fn timestamp(&self) -> u64;
 }
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct PacketHash(pub String);
-pub type Eui = String;
-pub type DevAddr = String;
-pub type GatewayB58 = String;
 
 /// Uplinks
 pub fn make_pr_start_req(packets: Vec<PacketUp>, config: &RoamingSettings) -> Result<String> {
@@ -77,20 +96,13 @@ pub fn hz_to_mhz(hz: u32) -> f64 {
     freq as f64 / 1_000.0
 }
 
-#[derive(Debug, PartialEq)]
-pub enum RoutingInfo {
-    Eui { app: Eui, dev: Eui },
-    DevAddr(DevAddr),
-    Unknown,
-}
-
 impl RoutingInfo {
     pub fn eui(app: EUI64<&[u8]>, dev: EUI64<&[u8]>) -> Self {
         Self::Eui {
-            app: EUI64::new(flip_endianness(app.as_ref()))
+            app: EUI64::new(Self::reversed(app.as_ref()))
                 .unwrap()
                 .to_string(),
-            dev: EUI64::new(flip_endianness(dev.as_ref()))
+            dev: EUI64::new(Self::reversed(dev.as_ref()))
                 .unwrap()
                 .to_string(),
         }
@@ -98,33 +110,13 @@ impl RoutingInfo {
     pub fn devaddr(devaddr: DevAddr) -> Self {
         Self::DevAddr(devaddr)
     }
-}
 
-fn flip_endianness(slice: &[u8]) -> Vec<u8> {
-    let mut flipped = Vec::with_capacity(slice.len());
-    for &byte in slice.iter().rev() {
-        flipped.push(byte);
-    }
-    flipped
-}
-
-#[derive(Debug, Clone)]
-pub struct PacketUp {
-    packet: PacketRouterPacketUpV1,
-    recv_time: u64,
-}
-
-impl From<PacketRouterPacketUpV1> for PacketUp {
-    fn from(value: PacketRouterPacketUpV1) -> Self {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64;
-        Self {
-            packet: value,
-            recv_time: now,
+    fn reversed(slice: &[u8]) -> Vec<u8> {
+        let mut flipped = Vec::with_capacity(slice.len());
+        for &byte in slice.iter().rev() {
+            flipped.push(byte);
         }
+        flipped
     }
 }
 
