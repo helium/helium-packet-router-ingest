@@ -1,3 +1,5 @@
+use crate::ul_token::make_token;
+use crate::{settings::RoamingSettings, Result};
 use helium_crypto::PublicKeyBinary;
 use helium_proto::services::router::PacketRouterPacketUpV1;
 use lorawan::parser::EUI64;
@@ -13,7 +15,7 @@ pub trait PacketUpTrait {
     fn region(&self) -> String;
     fn json_payload(&self) -> String;
     fn datarate_index(&self) -> u32;
-    fn frequency_mhz(&self) -> f32;
+    fn frequency_mhz(&self) -> f64;
     fn recv_time(&self) -> String;
     fn timestamp(&self) -> u64;
 }
@@ -24,15 +26,55 @@ pub type Eui = String;
 pub type DevAddr = String;
 pub type GatewayB58 = String;
 
-/// HTTP Roaming uses mHz, proto uses Hz
-pub fn mhz_to_hz(mhz: f32) -> u32 {
-    (mhz * 1_000_000.0) as u32
+/// Uplinks
+pub fn make_pr_start_req(packets: Vec<PacketUp>, config: &RoamingSettings) -> Result<String> {
+    let packet = packets.first().expect("at least one packet");
+
+    let (routing_key, routing_value) = match packet.routing_info() {
+        RoutingInfo::Eui { dev, .. } => ("DevEUI", dev),
+        RoutingInfo::DevAddr(devaddr) => ("DevAddr", devaddr),
+        RoutingInfo::Unknown => todo!("should never get here"),
+    };
+
+    let mut gw_info = vec![];
+    for packet in packets.iter() {
+        gw_info.push(serde_json::json!({
+            "ID": packet.gateway_mac_str(),
+            "RFRegion": packet.region(),
+            "RSSI": packet.rssi(),
+            "SNR": packet.snr(),
+            "DLAllowed": true
+        }));
+    }
+
+    Ok(serde_json::to_string(&serde_json::json!({
+        "ProtocolVersion" : "1.1",
+        "MessageType": "PRStartReq",
+        "SenderNSID": config.sender_nsid,
+        "ReceiverNSID": config.receiver_nsid,
+        "DedupWindowSize": config.dedup_window.to_string(),
+        "SenderID": config.helium_net_id,
+        "ReceiverID": config.target_net_id,
+        "PHYPayload": packet.json_payload(),
+        "ULMetaData": {
+            routing_key: routing_value,
+            "DataRate": packet.datarate_index(),
+            "ULFreq": packet.frequency_mhz(),
+            "RecvTime": packet.recv_time(),
+            "RFRegion": packet.region(),
+            "FNSULToken": make_token(packet.gateway_b58(), packet.timestamp()),
+            "GWCnt": packets.len(),
+            "GWInfo": gw_info
+        }
+    }))
+    .expect("pr_start_req json"))
 }
 
-pub fn hz_to_mhz(hz: u32) -> f32 {
+pub fn hz_to_mhz(hz: u32) -> f64 {
+    // NOTE: f64 is important, if it goes down to f32 we start to see rounding errors.
     // Truncate -> Round -> Truncate
-    let freq = (hz as f32) / 1_000.0;
-    freq.round() / 1_000.0
+    let freq = hz / 1_000;
+    freq as f64 / 1_000.0
 }
 
 #[derive(Debug, PartialEq)]
@@ -170,7 +212,7 @@ impl PacketUpTrait for PacketUp {
         }
     }
 
-    fn frequency_mhz(&self) -> f32 {
+    fn frequency_mhz(&self) -> f64 {
         hz_to_mhz(self.packet.frequency)
     }
 
@@ -211,5 +253,14 @@ mod test {
         } else {
             assert!(false);
         }
+    }
+
+    #[test]
+    fn join_accept_parse() {
+        let bytes =
+            hex::decode("20aaf0dbee7ea66c06c5b16d4d1aa23557eab691b9bbb22864831aaa2832d9d9c0")
+                .unwrap();
+        let x = lorawan::parser::parse(bytes);
+        println!("x: {x:?}");
     }
 }

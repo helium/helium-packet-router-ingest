@@ -1,5 +1,6 @@
 use actions::MsgSender;
 use clap::Parser;
+use helium_proto::services::router::EnvelopeUpV1;
 use settings::Settings;
 use std::path::PathBuf;
 
@@ -7,6 +8,7 @@ mod deduplicator;
 mod downlink;
 mod downlink_ingest;
 mod settings;
+mod ul_token;
 mod uplink;
 mod uplink_ingest;
 
@@ -156,9 +158,9 @@ mod app {
     use crate::{
         actions::{Msg, MsgSender},
         deduplicator::{Deduplicator, HandlePacket},
-        downlink,
         downlink::PacketDown,
         settings::Settings,
+        uplink,
         uplink::{GatewayB58, PacketHash},
         uplink_ingest::GatewayTx,
     };
@@ -256,7 +258,7 @@ mod app {
             Msg::UplinkSend(packet_hash) => {
                 let packets = app.deduplicator.get_packets(&packet_hash);
                 tracing::info!(num_packets = packets.len(), "deduplication done");
-                match downlink::make_pr_start_req(packets, &app.settings.roaming) {
+                match uplink::make_pr_start_req(packets, &app.settings.roaming) {
                     Ok(body) => UpdateAction::SendUplink(body),
                     Err(_) => {
                         tracing::warn!("ignoring invalid packet");
