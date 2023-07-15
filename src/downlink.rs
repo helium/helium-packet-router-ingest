@@ -31,13 +31,14 @@ pub enum HttpPayloadResp {
 pub fn parse_http_payload(value: serde_json::Value) -> Result<HttpPayloadResp> {
     use serde_json::from_value;
 
-    if let Ok(pr_start) = from_value::<PRStartAnsDownlink>(value.clone()) {
+    if let Ok(pr_start) = from_value::<PRStartAns>(value.clone()) {
         return Ok(HttpPayloadResp::Downlink(Box::new(pr_start)));
     }
     if let Ok(xmit) = from_value::<XmitDataReq>(value.clone()) {
         return Ok(HttpPayloadResp::Downlink(Box::new(xmit)));
     }
-    if let Ok(_plain) = from_value::<PRStartAnsPlain>(value.clone()) {
+    if let Ok(plain) = from_value::<PRStartAnsPlain>(value.clone()) {
+        tracing::trace!(?plain, "no downlink");
         return Ok(HttpPayloadResp::Noop);
     }
 
@@ -55,7 +56,7 @@ fn add_delay(timestamp: u64, add: u64) -> u64 {
     ((timestamp + add) as u32) as u64
 }
 
-impl PacketDownTrait for PRStartAnsDownlink {
+impl PacketDownTrait for PRStartAns {
     fn phy_payload(&self) -> String {
         self.phy_payload.clone()
     }
@@ -219,23 +220,7 @@ pub struct XmitDataReq {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct PRStartAnsPlain {
-    #[serde(rename = "ProtocolVersion")]
-    pub protocol_version: String,
-    #[serde(rename = "SenderID")]
-    pub sender_id: String,
-    #[serde(rename = "ReceiverID")]
-    pub receiver_id: String,
-    #[serde(rename = "TransactionID")]
-    pub transaction_id: u64,
-    #[serde(rename = "MessageType")]
-    pub message_type: String,
-    #[serde(rename = "Result")]
-    pub result: PRStartAnsResult,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct PRStartAnsDownlink {
+pub struct PRStartAns {
     #[serde(rename = "ProtocolVersion")]
     pub protocol_version: String,
     #[serde(rename = "SenderID")]
@@ -252,6 +237,24 @@ pub struct PRStartAnsDownlink {
     pub phy_payload: String,
     #[serde(rename = "DLMetaData")]
     pub dl_meta_data: DLMetaData,
+}
+
+/// This type exists to parse a PRStartAns that contains no downlink,
+/// rather than making DLMetaData optional.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PRStartAnsPlain {
+    #[serde(rename = "ProtocolVersion")]
+    pub protocol_version: String,
+    #[serde(rename = "SenderID")]
+    pub sender_id: String,
+    #[serde(rename = "ReceiverID")]
+    pub receiver_id: String,
+    #[serde(rename = "TransactionID")]
+    pub transaction_id: u64,
+    #[serde(rename = "MessageType")]
+    pub message_type: String,
+    #[serde(rename = "Result")]
+    pub result: PRStartAnsResult,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -275,14 +278,13 @@ pub struct DLMetaData {
     #[serde(rename = "ClassMode")]
     pub class_mode: ClassMode,
 
-    //
+    // rx windows
     #[serde(rename = "DLFreq1")]
     pub dl_freq_1: Option<f64>,
     #[serde(rename = "DataRate1")]
     pub data_rate_1: Option<u8>,
     #[serde(rename = "RXDelay1")]
     pub rx_delay_1: Option<u64>,
-
     #[serde(rename = "DLFreq2")]
     pub dl_freq_2: Option<f64>,
     #[serde(rename = "DataRate2")]
@@ -292,7 +294,7 @@ pub struct DLMetaData {
 #[cfg(test)]
 mod test {
     use super::HttpPayloadResp;
-    use crate::downlink::{parse_http_payload, PRStartAnsDownlink, PacketDownTrait};
+    use crate::downlink::{parse_http_payload, PRStartAns, PacketDownTrait};
     use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
 
     fn join_accept_payload() -> serde_json::Value {
@@ -391,7 +393,7 @@ mod test {
     #[test]
     fn join_accept_payload_decode() {
         let value = join_accept_payload();
-        let pr_start: PRStartAnsDownlink = serde_json::from_value(value).expect("to packet down");
+        let pr_start: PRStartAns = serde_json::from_value(value).expect("to packet down");
         let downlink = pr_start.to_packet_down();
 
         // This ensures downlink payloads are decoded, and not just turned into Vec<u8>
