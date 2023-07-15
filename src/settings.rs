@@ -14,11 +14,6 @@ pub struct Settings {
     /// How long before Packets are cleaned out of being deduplicated in duration time.
     #[arg(long, default_value = "10s")]
     pub cleanup_window: DurationString,
-
-    /// Send PRStartNotif message after sending Downlink to gateway.
-    /// Chirpstack does nothing with the notif message and returns an 400.
-    #[arg(long, default_value = "false")]
-    pub send_pr_start_notif: bool,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]
@@ -39,6 +34,10 @@ pub struct RoamingSettings {
     /// How long were the packets held in duration time (1250ms, 1.2s)
     #[arg(long, default_value = "1250ms")]
     pub dedup_window: DurationString,
+    /// Send PRStartNotif message after sending Downlink to gateway.
+    /// Chirpstack does nothing with the notif message and returns an 400.
+    #[arg(long, default_value = "false")]
+    pub send_pr_start_notif: bool,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]

@@ -4,10 +4,6 @@
 ## same packets from gateways that are slow.
 cleanup_window = "30s"
 
-## Not all LNSs handle a PRStartNotif message after a JoinAccept has been sent.
-send_pr_start_notif = false
-
-
 [roaming]
 ## Main Helium NetID.
 helium_net_id = "C00053"
@@ -23,6 +19,9 @@ receiver_nsid = "0000000000000000"
 
 ## Time to wait for uplink deduplication.
 dedup_window = "250ms"
+
+## Not all LNSs handle a PRStartNotif message after a JoinAccept has been sent.
+send_pr_start_notif = false
 
 [network]
 ## Endpoint of LNS for all roaming messages.

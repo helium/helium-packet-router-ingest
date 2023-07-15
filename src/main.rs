@@ -1,6 +1,5 @@
 use actions::MsgSender;
 use clap::Parser;
-use helium_proto::services::router::EnvelopeUpV1;
 use settings::Settings;
 use std::path::PathBuf;
 
