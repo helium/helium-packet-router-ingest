@@ -1,7 +1,9 @@
+use crate::region;
 use crate::ul_token::make_token;
 use crate::{settings::RoamingSettings, Result};
 use helium_crypto::PublicKeyBinary;
 use helium_proto::services::router::PacketRouterPacketUpV1;
+use helium_proto::Region;
 use lorawan::parser::EUI64;
 use lorawan::parser::{DataHeader, PhyPayload};
 
@@ -37,9 +39,9 @@ pub trait PacketUpTrait {
     fn gateway_mac_str(&self) -> String;
     fn rssi(&self) -> i32;
     fn snr(&self) -> f32;
-    fn region(&self) -> String;
+    fn region(&self) -> Region;
     fn json_payload(&self) -> String;
-    fn datarate_index(&self) -> u32;
+    fn datarate_index(&self) -> region::DR;
     fn frequency_mhz(&self) -> f64;
     fn recv_time(&self) -> String;
     fn timestamp(&self) -> u64;
@@ -81,7 +83,7 @@ pub fn make_pr_start_req(packets: Vec<PacketUp>, config: &RoamingSettings) -> Re
             "ULFreq": packet.frequency_mhz(),
             "RecvTime": packet.recv_time(),
             "RFRegion": packet.region(),
-            "FNSULToken": make_token(packet.gateway_b58(), packet.timestamp()),
+            "FNSULToken": make_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
             "GWCnt": packets.len(),
             "GWInfo": gw_info
         }
@@ -156,8 +158,8 @@ impl PacketUpTrait for PacketUp {
         hex::encode(hash)
     }
 
-    fn region(&self) -> String {
-        self.packet.region().to_string()
+    fn region(&self) -> Region {
+        self.packet.region()
     }
 
     fn rssi(&self) -> i32 {
@@ -172,36 +174,9 @@ impl PacketUpTrait for PacketUp {
         hex::encode(&self.packet.payload)
     }
 
-    fn datarate_index(&self) -> u32 {
-        // FIXME: handle different region
-        use helium_proto::DataRate;
-        match self.packet.datarate() {
-            DataRate::Sf12bw125 => todo!(),
-            DataRate::Sf11bw125 => todo!(),
-            DataRate::Sf10bw125 => 0,
-            DataRate::Sf9bw125 => 1,
-            DataRate::Sf8bw125 => 2,
-            DataRate::Sf7bw125 => 3,
-            DataRate::Sf12bw250 => 8,
-            DataRate::Sf11bw250 => 9,
-            DataRate::Sf10bw250 => 10,
-            DataRate::Sf9bw250 => 11,
-            DataRate::Sf8bw250 => 12,
-            DataRate::Sf7bw250 => 13,
-            DataRate::Sf12bw500 => todo!(),
-            DataRate::Sf11bw500 => todo!(),
-            DataRate::Sf10bw500 => todo!(),
-            DataRate::Sf9bw500 => todo!(),
-            DataRate::Sf8bw500 => 4,
-            DataRate::Sf7bw500 => todo!(),
-            DataRate::Lrfhss1bw137 => todo!(),
-            DataRate::Lrfhss2bw137 => todo!(),
-            DataRate::Lrfhss1bw336 => todo!(),
-            DataRate::Lrfhss2bw336 => todo!(),
-            DataRate::Lrfhss1bw1523 => 5,
-            DataRate::Lrfhss2bw1523 => 6,
-            DataRate::Fsk50 => todo!(),
-        }
+    fn datarate_index(&self) -> region::DR {
+        region::uplink_datarate(self.region(), self.packet.datarate())
+            .expect("valid uplink datarate index")
     }
 
     fn frequency_mhz(&self) -> f64 {
@@ -252,7 +227,7 @@ mod test {
         let bytes =
             hex::decode("20aaf0dbee7ea66c06c5b16d4d1aa23557eab691b9bbb22864831aaa2832d9d9c0")
                 .unwrap();
-        let x = lorawan::parser::parse(bytes);
-        println!("x: {x:?}");
+        let _x = lorawan::parser::parse(bytes);
+        // println!("x: {_x:?}");
     }
 }

@@ -1,10 +1,12 @@
 use crate::uplink::GatewayB58;
+use helium_proto::Region;
 use hex::FromHex;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Token {
     pub timestamp: u64,
     pub gateway: GatewayB58,
+    pub region: Region,
 }
 
 impl FromHex for Token {
@@ -16,7 +18,11 @@ impl FromHex for Token {
     }
 }
 
-pub fn make_token(gateway: GatewayB58, timestamp: u64) -> String {
-    let token = Token { gateway, timestamp };
+pub fn make_token(gateway: GatewayB58, timestamp: u64, region: Region) -> String {
+    let token = Token {
+        gateway,
+        timestamp,
+        region,
+    };
     hex::encode(serde_json::to_string(&token).unwrap())
 }

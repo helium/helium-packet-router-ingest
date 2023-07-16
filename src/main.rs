@@ -6,6 +6,7 @@ use std::path::PathBuf;
 mod deduplicator;
 mod downlink;
 mod downlink_ingest;
+mod region;
 mod settings;
 mod ul_token;
 mod uplink;

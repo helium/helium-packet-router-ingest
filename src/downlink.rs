@@ -1,4 +1,7 @@
-use crate::{settings::RoamingSettings, ul_token::Token, uplink::GatewayB58, Result};
+use crate::{
+    region::downlink_datarate, settings::RoamingSettings, ul_token::Token, uplink::GatewayB58,
+    Result,
+};
 use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
 
 pub type TransactionID = u64;
@@ -155,6 +158,11 @@ impl PacketDownTrait for XmitDataReq {
 }
 
 impl DLMetaData {
+    fn datarate(&self, dr: u8) -> i32 {
+        downlink_datarate(self.fns_ul_token.region, dr)
+            .expect("valid dr")
+            .into()
+    }
     fn rx1_window(&self, timestamp: u64) -> Option<WindowV1> {
         if let (Some(freq), Some(data_rate), Some(mut rx_delay)) =
             (self.dl_freq_1, self.data_rate_1, self.rx_delay_1)
@@ -165,7 +173,7 @@ impl DLMetaData {
             return Some(WindowV1 {
                 timestamp: add_delay(timestamp, rx_delay * 1_000_000),
                 frequency: mhz_to_hz(freq),
-                datarate: data_rate.into(),
+                datarate: self.datarate(data_rate),
                 immediate: false,
             });
         }
@@ -181,7 +189,7 @@ impl DLMetaData {
             return Some(WindowV1 {
                 timestamp: add_delay(timestamp, (rx_delay + 1) * 1_000_000),
                 frequency: mhz_to_hz(freq),
-                datarate: data_rate.into(),
+                datarate: self.datarate(data_rate),
                 immediate: false,
             });
         }
@@ -193,7 +201,7 @@ impl DLMetaData {
             return Some(WindowV1 {
                 timestamp: 0,
                 frequency: mhz_to_hz(freq),
-                datarate: data_rate.into(),
+                datarate: self.datarate(data_rate),
                 immediate: true,
             });
         }
@@ -294,10 +302,15 @@ pub struct DLMetaData {
 #[cfg(test)]
 mod test {
     use super::HttpPayloadResp;
-    use crate::downlink::{parse_http_payload, PRStartAns, PacketDownTrait};
+    use crate::{
+        downlink::{parse_http_payload, PRStartAns, PacketDownTrait},
+        region::{downlink_datarate, Region},
+        ul_token::make_token,
+    };
     use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
 
     fn join_accept_payload() -> serde_json::Value {
+        let token = make_token("test-gateway".to_string(), 100, Region::Us915);
         serde_json::json!({
             "ProtocolVersion": "1.1",
             "SenderID": "000024",
@@ -326,7 +339,7 @@ mod test {
                 "ClassMode": "A",
                 "DataRate1": 10,
                 "DataRate2": 8,
-                "FNSULToken": "7b2274696d657374616d70223a343034383533323435322c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d",
+                "FNSULToken": token,
                 "GWInfo": [{"FineRecvTime": null,"RSSI": null,"SNR": null,"Lat": null,"Lon": null,"DLAllowed": null}],
               "HiPriorityFlag": false
             },
@@ -335,6 +348,7 @@ mod test {
     }
 
     fn unconfirmed_downlink_payload() -> serde_json::Value {
+        let token = make_token("test-gateway".to_string(), 100, Region::Us915);
         serde_json::json!({
             "ProtocolVersion":"1.1",
             "SenderID":"000024",
@@ -354,7 +368,7 @@ mod test {
                 "ClassMode":"A",
                 "DataRate1":10,
                 "DataRate2":8,
-                "FNSULToken":"7b2274696d657374616d70223a31303739333532372c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d",
+                "FNSULToken":token,
                 "GWInfo":[{
                     "FineRecvTime":null,
                     "RSSI":null,
@@ -420,15 +434,15 @@ mod test {
                     131, 187, 126, 93, 71, 184, 73, 239, 13, 41, 11, 175, 178, 8, 114, 174
                 ],
                 rx1: Some(WindowV1 {
-                    timestamp: 4053532452,
+                    timestamp: 5000100,
                     frequency: 925100000,
-                    datarate: 10,
+                    datarate: downlink_datarate(Region::Us915, 10).unwrap().into(),
                     immediate: false
                 }),
                 rx2: Some(WindowV1 {
-                    timestamp: 4054532452,
+                    timestamp: 6000100,
                     frequency: 923300000,
-                    datarate: 8,
+                    datarate: downlink_datarate(Region::Us915, 8).unwrap().into(),
                     immediate: false
                 })
             },
@@ -438,7 +452,8 @@ mod test {
 
     #[test]
     fn join_accept_rx1_only() {
-        let value = serde_json::json!({"ProtocolVersion":"1.1","SenderNSID":"f03d290000000101","ReceiverNSID":"6081fffe12345678","SenderID":"600013","ReceiverID":"c00053","TransactionID":1152841626,"MessageType":"PRStartAns","Result":{"ResultCode":"Success"},"Lifetime":0,"DevEUI":"0018b20000002487","SenderToken":"0108f03d290000000101","PHYPayload":"202cf4a93d978c060233bbaa88d20f48673136ea147f5ad92e8b015a581a8d74cc","DLMetaData":{"DevEUI":"0018b20000002487","RXDelay1":5,"DLFreq1":869.525,"DataRate1":0,"FNSULToken":"7b2274696d657374616d70223a31303739333532372c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d","ClassMode":"A","HiPriorityFlag":false}});
+        let token = make_token("test-gateway".to_string(), 100, Region::Eu868);
+        let value = serde_json::json!({"ProtocolVersion":"1.1","SenderNSID":"f03d290000000101","ReceiverNSID":"6081fffe12345678","SenderID":"600013","ReceiverID":"c00053","TransactionID":1152841626,"MessageType":"PRStartAns","Result":{"ResultCode":"Success"},"Lifetime":0,"DevEUI":"0018b20000002487","SenderToken":"0108f03d290000000101","PHYPayload":"202cf4a93d978c060233bbaa88d20f48673136ea147f5ad92e8b015a581a8d74cc","DLMetaData":{"DevEUI":"0018b20000002487","RXDelay1":5,"DLFreq1":869.525,"DataRate1":0,"FNSULToken":token,"ClassMode":"A","HiPriorityFlag":false}});
         let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("not a downlink") };
         assert_eq!(
             PacketRouterPacketDownV1 {
@@ -447,9 +462,9 @@ mod test {
                     54, 234, 20, 127, 90, 217, 46, 139, 1, 90, 88, 26, 141, 116, 204
                 ],
                 rx1: Some(WindowV1 {
-                    timestamp: 15793527,
+                    timestamp: 5000100,
                     frequency: 869525000,
-                    datarate: 0,
+                    datarate: downlink_datarate(Region::Eu868, 0).unwrap().into(),
                     immediate: false
                 }),
                 rx2: None,
@@ -460,7 +475,8 @@ mod test {
 
     #[test]
     fn join_accept_rx2_only() {
-        let value = serde_json::json!({"ProtocolVersion":"1.1","SenderNSID":"f03d290000000101","ReceiverNSID":"6081fffe12345678","SenderID":"600013","ReceiverID":"c00053","TransactionID":1152841626,"MessageType":"PRStartAns","Result":{"ResultCode":"Success"},"Lifetime":0,"DevEUI":"0018b20000002487","SenderToken":"0108f03d290000000101","PHYPayload":"202cf4a93d978c060233bbaa88d20f48673136ea147f5ad92e8b015a581a8d74cc","DLMetaData":{"DevEUI":"0018b20000002487","RXDelay1":5,"DLFreq2":869.525,"DataRate2":0,"FNSULToken":"7b2274696d657374616d70223a31303739333532372c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d","ClassMode":"A","HiPriorityFlag":false}});
+        let token = make_token("test-gateway".to_string(), 100, Region::Eu868);
+        let value = serde_json::json!({"ProtocolVersion":"1.1","SenderNSID":"f03d290000000101","ReceiverNSID":"6081fffe12345678","SenderID":"600013","ReceiverID":"c00053","TransactionID":1152841626,"MessageType":"PRStartAns","Result":{"ResultCode":"Success"},"Lifetime":0,"DevEUI":"0018b20000002487","SenderToken":"0108f03d290000000101","PHYPayload":"202cf4a93d978c060233bbaa88d20f48673136ea147f5ad92e8b015a581a8d74cc","DLMetaData":{"DevEUI":"0018b20000002487","RXDelay1":5,"DLFreq2":869.525,"DataRate2":0,"FNSULToken":token,"ClassMode":"A","HiPriorityFlag":false}});
         let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("not a downlink") };
         assert_eq!(
             PacketRouterPacketDownV1 {
@@ -470,9 +486,9 @@ mod test {
                 ],
                 rx1: None,
                 rx2: Some(WindowV1 {
-                    timestamp: 16793527,
+                    timestamp: 6000100,
                     frequency: 869525000,
-                    datarate: 0,
+                    datarate: downlink_datarate(Region::Eu868, 0).unwrap().into(),
                     immediate: false
                 })
             },
@@ -492,15 +508,15 @@ mod test {
                     96,
                 ],
                 rx1: Some(WindowV1 {
-                    timestamp: 11793527,
+                    timestamp: 1000100,
                     frequency: 926900000,
-                    datarate: 10,
+                    datarate: downlink_datarate(Region::Us915, 10).unwrap().into(),
                     immediate: false,
                 }),
                 rx2: Some(WindowV1 {
-                    timestamp: 12793527,
+                    timestamp: 2000100,
                     frequency: 923300000,
-                    datarate: 8,
+                    datarate: downlink_datarate(Region::Us915, 8).unwrap().into(),
                     immediate: false,
                 }),
             },
@@ -510,7 +526,8 @@ mod test {
 
     #[test]
     fn xmit_rx1_only() {
-        let value = serde_json::json!({ "ProtocolVersion":"1.1", "SenderID":"000024", "ReceiverID":"c00053", "TransactionID":274631693, "MessageType":"XmitDataReq", "PHYPayload":"6073000048ab00000300020070030000ff01063d32ce60", "ULMetaData":null, "DLMetaData":{ "DevEUI":"0000000000000003", "FPort":null, "FCntDown":null, "Confirmed":false, "DLFreq1":926.9, "RXDelay1":1, "ClassMode":"A", "DataRate1":10, "FNSULToken":"7b2274696d657374616d70223a31303739333532372c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d", "GWInfo":[{ "FineRecvTime":null, "RSSI":null, "SNR":null, "Lat":null, "Lon":null, "DLAllowed":null }], "HiPriorityFlag":false} } );
+        let token = make_token("test-gateway".to_string(), 100, Region::Us915);
+        let value = serde_json::json!({ "ProtocolVersion":"1.1", "SenderID":"000024", "ReceiverID":"c00053", "TransactionID":274631693, "MessageType":"XmitDataReq", "PHYPayload":"6073000048ab00000300020070030000ff01063d32ce60", "ULMetaData":null, "DLMetaData":{ "DevEUI":"0000000000000003", "FPort":null, "FCntDown":null, "Confirmed":false, "DLFreq1":926.9, "RXDelay1":1, "ClassMode":"A", "DataRate1":10, "FNSULToken":token, "GWInfo":[{ "FineRecvTime":null, "RSSI":null, "SNR":null, "Lat":null, "Lon":null, "DLAllowed":null }], "HiPriorityFlag":false} } );
         let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
 
         assert_eq!(
@@ -520,9 +537,9 @@ mod test {
                     96,
                 ],
                 rx1: Some(WindowV1 {
-                    timestamp: 11793527,
+                    timestamp: 1000100,
                     frequency: 926900000,
-                    datarate: 10,
+                    datarate: downlink_datarate(Region::Us915, 10).unwrap().into(),
                     immediate: false,
                 }),
                 rx2: None,
@@ -533,7 +550,8 @@ mod test {
 
     #[test]
     fn xmit_x2_only() {
-        let value = serde_json::json!({ "ProtocolVersion":"1.1", "SenderID":"000024", "ReceiverID":"c00053", "TransactionID":274631693, "MessageType":"XmitDataReq", "PHYPayload":"6073000048ab00000300020070030000ff01063d32ce60", "ULMetaData":null, "DLMetaData":{ "DevEUI":"0000000000000003", "FPort":null, "FCntDown":null, "Confirmed":false, "DLFreq2":923.3, "RXDelay1":1, "ClassMode":"A", "DataRate2":8, "FNSULToken":"7b2274696d657374616d70223a31303739333532372c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d", "GWInfo":[{ "FineRecvTime":null, "RSSI":null, "SNR":null, "Lat":null, "Lon":null, "DLAllowed":null }], "HiPriorityFlag":false} } );
+        let token = make_token("test-gateway".to_string(), 100, Region::Us915);
+        let value = serde_json::json!({ "ProtocolVersion":"1.1", "SenderID":"000024", "ReceiverID":"c00053", "TransactionID":274631693, "MessageType":"XmitDataReq", "PHYPayload":"6073000048ab00000300020070030000ff01063d32ce60", "ULMetaData":null, "DLMetaData":{ "DevEUI":"0000000000000003", "FPort":null, "FCntDown":null, "Confirmed":false, "DLFreq2":923.3, "RXDelay1":1, "ClassMode":"A", "DataRate2":8, "FNSULToken":token, "GWInfo":[{ "FineRecvTime":null, "RSSI":null, "SNR":null, "Lat":null, "Lon":null, "DLAllowed":null }], "HiPriorityFlag":false} } );
         let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
 
         assert_eq!(
@@ -544,9 +562,9 @@ mod test {
                 ],
                 rx1: None,
                 rx2: Some(WindowV1 {
-                    timestamp: 12793527,
+                    timestamp: 2000100,
                     frequency: 923300000,
-                    datarate: 8,
+                    datarate: downlink_datarate(Region::Us915, 8).unwrap().into(),
                     immediate: false,
                 }),
             },
@@ -556,6 +574,7 @@ mod test {
 
     #[test]
     fn xmit_class_c() {
+        let token = make_token("test-gateway".to_string(), 100, Region::Us915);
         let value = serde_json::json!({
             "ProtocolVersion":"1.1",
             "SenderID":"000024",
@@ -573,7 +592,7 @@ mod test {
                 "RXDelay1":1,
                 "ClassMode":"C",
                 "DataRate2":8,
-                "FNSULToken":"7b2274696d657374616d70223a31303739333532372c2267617465776179223a2231336a6e776e5a594c446777394b64347a7033336379783474424e514a346a4d6f4e76485469467976556b41676b6851557a39227d",
+                "FNSULToken":token,
                 "GWInfo":[{
                     "FineRecvTime":null,
                     "RSSI":null,
@@ -596,7 +615,7 @@ mod test {
                 rx1: Some(WindowV1 {
                     timestamp: 0,
                     frequency: 923300000,
-                    datarate: 8,
+                    datarate: downlink_datarate(Region::Us915, 8).unwrap().into(),
                     immediate: true,
                 }),
                 rx2: None,
