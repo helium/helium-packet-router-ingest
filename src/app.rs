@@ -182,17 +182,22 @@ async fn update(app: &mut App, msg: Msg) -> UpdateAction {
             HandlePacket::New(hash) => UpdateAction::StartTimerForNewPacket(hash),
             HandlePacket::Existing => UpdateAction::Noop,
         },
-        Msg::UplinkSend(packet_hash) => {
-            let packets = app.deduplicator.get_packets(&packet_hash);
-            tracing::info!(num_packets = packets.len(), "deduplication done");
-            match uplink::make_pr_start_req(packets, &app.settings.roaming) {
-                Ok(body) => UpdateAction::SendUplink(body),
-                Err(_) => {
-                    tracing::warn!("ignoring invalid packet");
-                    UpdateAction::Noop
+        Msg::UplinkSend(packet_hash) => match app.deduplicator.get_packets(&packet_hash) {
+            None => {
+                tracing::warn!(?packet_hash, "message to send unknown packet");
+                UpdateAction::Noop
+            }
+            Some(packets) => {
+                tracing::info!(num_packets = packets.len(), "deduplication done");
+                match uplink::make_pr_start_req(packets, &app.settings.roaming) {
+                    Ok(body) => UpdateAction::SendUplink(body),
+                    Err(err) => {
+                        tracing::warn!(?packet_hash, ?err, "failed to make pr_start_req");
+                        UpdateAction::Noop
+                    }
                 }
             }
-        }
+        },
         Msg::UplinkCleanup(packet_hash) => {
             app.deduplicator.remove_packets(&packet_hash);
             UpdateAction::Noop

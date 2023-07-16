@@ -34,11 +34,8 @@ impl Deduplicator {
         result
     }
 
-    pub fn get_packets(&self, hash: &PacketHash) -> Vec<PacketUp> {
-        self.packets
-            .get(hash)
-            .expect("packets exist for hash")
-            .to_owned()
+    pub fn get_packets(&self, hash: &PacketHash) -> Option<&Vec<PacketUp>> {
+        self.packets.get(hash)
     }
 
     pub fn remove_packets(&mut self, hash: &PacketHash) {

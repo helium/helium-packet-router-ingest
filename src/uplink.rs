@@ -48,7 +48,7 @@ pub trait PacketUpTrait {
 }
 
 /// Uplinks
-pub fn make_pr_start_req(packets: Vec<PacketUp>, config: &RoamingSettings) -> Result<String> {
+pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Result<String> {
     let packet = packets.first().expect("at least one packet");
 
     let (routing_key, routing_value) = match packet.routing_info() {
