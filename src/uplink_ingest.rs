@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, time::Duration};
 
 use crate::{
-    actions::MsgSender,
+    app::MsgSender,
     uplink::{PacketUp, PacketUpTrait},
     Result,
 };

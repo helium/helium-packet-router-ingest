@@ -198,6 +198,12 @@ impl PacketUpTrait for PacketUp {
     }
 }
 
+impl From<&str> for PacketHash {
+    fn from(value: &str) -> Self {
+        Self(value.to_string())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::uplink::RoutingInfo;

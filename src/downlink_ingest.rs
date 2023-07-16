@@ -1,4 +1,4 @@
-use crate::{actions::MsgSender, downlink};
+use crate::{app::MsgSender, downlink};
 use axum::{
     extract,
     response::IntoResponse,
