@@ -192,5 +192,6 @@ fn default_settings() -> Settings {
             uplink_listen: "0.0.0.0:9001".parse().unwrap(),
         },
         cleanup_window: DurationString::from_string("10s".to_string()).unwrap(),
+        metrics_listen: "0.0.0.0:9002".parse().unwrap(),
     }
 }

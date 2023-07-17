@@ -8,7 +8,6 @@ edition = "2021"
 [dependencies]
 anyhow = "1.0.71"
 clap = { version = "4.3.11", features = ["derive"] }
-console-subscriber = "0.1.10"
 helium-crypto = "0.7.0"
 rand = "0.8.5"
 reqwest = { version = "0.11.18", features = ["json"] }
@@ -28,6 +27,5 @@ lorawan = "0.7.3"
 chrono = "0.4.26"
 xxhash-rust = { version = "0.8.6", features = ["xxh64"] }
 duration-string = { version = "0.3.0", features = ["serde"] }
-
-[features]
-console = []
+metrics = "0.21.1"
+metrics-exporter-prometheus = "0.12.1"

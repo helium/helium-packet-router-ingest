@@ -54,6 +54,7 @@ impl MsgSender {
     }
 
     pub async fn uplink_receive(&self, packet: PacketUp) {
+        metrics::increment_counter!("uplink_receive");
         self.0
             .send(Msg::UplinkReceive(packet))
             .await
@@ -61,10 +62,12 @@ impl MsgSender {
     }
 
     pub async fn uplink_send(&self, key: PacketHash) {
+        metrics::increment_counter!("uplink_send");
         self.0.send(Msg::UplinkSend(key)).await.expect("dedup done");
     }
 
     pub async fn uplink_cleanup(&self, key: PacketHash) {
+        metrics::increment_counter!("uplink cleanup");
         self.0
             .send(Msg::UplinkCleanup(key))
             .await
@@ -72,6 +75,7 @@ impl MsgSender {
     }
 
     pub async fn gateway_connect(&self, gateway_b58: GatewayB58, downlink_sender: GatewayTx) {
+        metrics::increment_gauge!("connected_gateways", 1.0);
         self.0
             .send(Msg::GatewayConnect(gateway_b58, downlink_sender))
             .await
@@ -79,6 +83,7 @@ impl MsgSender {
     }
 
     pub async fn gateway_disconnect(&self, gateway: GatewayB58) {
+        metrics::decrement_gauge!("connected_gateways", 1.0);
         self.0
             .send(Msg::GatewayDisconnect(gateway))
             .await
@@ -86,6 +91,7 @@ impl MsgSender {
     }
 
     pub async fn downlink(&self, downlink: PacketDown) {
+        metrics::increment_counter!("downlink");
         self.0
             .send(Msg::Downlink(downlink))
             .await

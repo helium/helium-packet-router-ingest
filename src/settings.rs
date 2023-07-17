@@ -4,16 +4,20 @@ use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]
 pub struct Settings {
-    /// Roaming settings
+    /// Roaming Settings.
     #[command(flatten)]
     pub roaming: RoamingSettings,
-    /// Network options
+    /// Network Settings.
     #[command(flatten)]
     pub network: NetworkSettings,
 
     /// How long before Packets are cleaned out of being deduplicated in duration time.
     #[arg(long, default_value = "10s")]
     pub cleanup_window: DurationString,
+
+    /// Listen address for Metrics endpoint.
+    #[arg(long, default_value = "")]
+    pub metrics_listen: SocketAddr,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]
