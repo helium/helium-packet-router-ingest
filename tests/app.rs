@@ -8,22 +8,12 @@ use hpr_http_rs::{
     Result,
 };
 
-#[test]
-fn app_can_be_constructed() -> Result {
-    let settings = default_settings();
-
-    let (tx, rx) = MsgSender::new();
-    let _app = app::App::new(tx, rx, settings);
-
-    Ok(())
-}
-
 #[tokio::test]
 async fn first_seen_packet_starts_timer() -> Result {
     let (tx, mut app) = make_app();
 
     // queue uplink received message
-    let packet = packet_up();
+    let packet = join_req_packet_up();
     tx.uplink_receive(packet.clone()).await;
 
     // tick one message
@@ -31,7 +21,7 @@ async fn first_seen_packet_starts_timer() -> Result {
         UpdateAction::StartTimerForNewPacket(hash) => {
             assert_eq!(hash, packet.hash())
         }
-        _ => panic!("expected start timer for new packet message"),
+        _ => anyhow::bail!("expected start timer for new packet message"),
     };
 
     Ok(())
@@ -41,16 +31,18 @@ async fn first_seen_packet_starts_timer() -> Result {
 async fn stores_duplicate_packets() -> Result {
     let (tx, mut app) = make_app();
 
-    let packet1 = packet_up_from_gateway("one");
-    let packet2 = packet_up_from_gateway("two");
+    let packet1 = join_req_packet_up_from_gateway("one");
+    let packet2 = join_req_packet_up_from_gateway("two");
     tx.uplink_receive(packet1.clone()).await;
     tx.uplink_receive(packet2.clone()).await;
 
     let _first_action = app::handle_single_message(&mut app).await;
     match app::handle_single_message(&mut app).await {
         UpdateAction::Noop => (),
-        _ => panic!("expected second packet to result in nooop"),
+        _ => anyhow::bail!("expected second packet to result in nooop"),
     }
+    assert_eq!(1, app.current_packet_count());
+    assert_eq!(2, app.total_current_packet_count());
 
     Ok(())
 }
@@ -68,13 +60,13 @@ async fn gateway_connect_disconnect() -> Result {
 
     match app::handle_single_message(&mut app).await {
         UpdateAction::Noop => (),
-        _ => panic!("expected no action from gateway connect"),
+        _ => anyhow::bail!("expected no action from gateway connect"),
     }
     assert_eq!(1, app.gateway_count());
 
     match app::handle_single_message(&mut app).await {
         UpdateAction::Noop => (),
-        _ => panic!("expected no action from gateway disconnect"),
+        _ => anyhow::bail!("expected no action from gateway disconnect"),
     }
     assert_eq!(0, app.gateway_count());
 
@@ -90,24 +82,84 @@ async fn sending_non_existent_packet() -> Result {
 
     match app::handle_single_message(&mut app).await {
         UpdateAction::Noop => (),
-        _ => panic!("expected no action from unknown packet hash"),
+        _ => anyhow::bail!("expected no action from unknown packet hash"),
     }
 
     Ok(())
 }
 
-// helpers ========================================================================
-fn packet_up() -> PacketUp {
-    packet_up_from_gateway("")
+#[tokio::test]
+async fn sending_packet() -> Result {
+    let (tx, mut app) = make_app();
+
+    // Send message for packet hash never seen
+    let packet = join_req_packet_up_from_gateway("one");
+    tx.uplink_receive(packet.clone()).await;
+    tx.uplink_send(packet.hash()).await;
+
+    // ingest packet
+    app::handle_single_message(&mut app).await;
+    assert_eq!(1, app.current_packet_count());
+
+    match app::handle_single_message(&mut app).await {
+        UpdateAction::SendUplink(_json_body) => (),
+        a => anyhow::bail!("expected send uplink from known packet hash: {a:?}"),
+    }
+
+    Ok(())
 }
 
-fn packet_up_from_gateway(gw: &str) -> PacketUp {
+#[tokio::test]
+async fn cleanup_unknown_packet() -> Result {
+    let (tx, mut app) = make_app();
+
+    // Send message for packet hash never seen
+    tx.uplink_cleanup("fake-packet".into()).await;
+
+    match app::handle_single_message(&mut app).await {
+        UpdateAction::Noop => (),
+        _ => anyhow::bail!("expected no action from unknown packet hash"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn cleanup_packet() -> Result {
+    let (tx, mut app) = make_app();
+
+    // Send message for packet hash never seen
+    let packet = join_req_packet_up_from_gateway("one");
+    tx.uplink_receive(packet.clone()).await;
+    tx.uplink_cleanup(packet.hash()).await;
+
+    // ingest packet
+    app::handle_single_message(&mut app).await;
+    assert_eq!(1, app.current_packet_count());
+
+    match app::handle_single_message(&mut app).await {
+        UpdateAction::Noop => (),
+        _ => anyhow::bail!("expected no action from known packet hash"),
+    }
+    assert_eq!(0, app.current_packet_count());
+
+    Ok(())
+}
+
+// helpers ========================================================================
+fn join_req_packet_up() -> PacketUp {
+    join_req_packet_up_from_gateway("")
+}
+
+fn join_req_packet_up_from_gateway(gw: &str) -> PacketUp {
     let packet = PacketRouterPacketUpV1 {
-        payload: vec![],
+        payload: vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 196, 160, 173, 225, 146, 91,
+        ],
         timestamp: 0,
         rssi: 0,
         frequency: 0,
-        datarate: 0,
+        datarate: 2,
         snr: 0.0,
         region: 0,
         hold_time: 0,

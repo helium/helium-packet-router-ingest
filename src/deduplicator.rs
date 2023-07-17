@@ -2,7 +2,7 @@ use crate::uplink::{PacketHash, PacketUp, PacketUpTrait};
 use std::collections::HashMap;
 
 pub struct Deduplicator {
-    packets: HashMap<PacketHash, Vec<PacketUp>>,
+    pub packets: HashMap<PacketHash, Vec<PacketUp>>,
 }
 
 pub enum HandlePacket {

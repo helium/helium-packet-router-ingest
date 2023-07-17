@@ -115,6 +115,16 @@ impl App {
     pub fn gateway_count(&self) -> usize {
         self.gateway_map.len()
     }
+
+    /// How many packet hashes are stored
+    pub fn current_packet_count(&self) -> usize {
+        self.deduplicator.packets.len()
+    }
+
+    /// How many packet hashes including copies
+    pub fn total_current_packet_count(&self) -> usize {
+        self.deduplicator.packets.values().map(|x| x.len()).sum()
+    }
 }
 
 pub fn start(
@@ -133,7 +143,7 @@ pub fn start(
 
 pub async fn handle_single_message(app: &mut App) -> UpdateAction {
     let message = app.message_rx.recv().await.unwrap();
-    update(app, message).await
+    handle_message(app, message).await
 }
 
 pub async fn handle_update_action(app: &App, action: UpdateAction) {
@@ -151,10 +161,9 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
                 sender.uplink_cleanup(hash).await;
             });
         }
-        UpdateAction::SendDownlink(gw, downlink) => {
-            let gateway_name = downlink.gateway();
-            gw.send_downlink(downlink.to_packet_down()).await;
-            tracing::info!(gw = gateway_name, "downlink sent");
+        UpdateAction::SendDownlink(gw_tx, downlink) => {
+            gw_tx.send_downlink(downlink.to_packet_down()).await;
+            tracing::info!(gw = downlink.gateway(), "downlink sent");
 
             if let Some(body) = downlink.http_body(&app.settings.roaming) {
                 let res = reqwest::Client::new()
@@ -176,7 +185,7 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
     }
 }
 
-async fn update(app: &mut App, msg: Msg) -> UpdateAction {
+async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
     match msg {
         Msg::UplinkReceive(packet) => match app.deduplicator.handle_packet(packet) {
             HandlePacket::New(hash) => UpdateAction::StartTimerForNewPacket(hash),
