@@ -1,48 +1,48 @@
 use crate::{
-    region::downlink_datarate, settings::RoamingSettings, ul_token::Token, uplink::GatewayB58,
+    region::downlink_datarate,
+    settings::RoamingSettings,
+    ul_token::{self, Token},
+    uplink::GatewayB58,
     Result,
 };
 use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
 
-pub type TransactionID = u64;
-
-pub trait PacketDownTrait {
-    fn payload(&self) -> Vec<u8> {
-        hex::decode(self.phy_payload()).expect("encoded payload")
-    }
-    fn phy_payload(&self) -> String;
-    fn gateway(&self) -> GatewayB58;
-    fn to_packet_down(&self) -> PacketRouterPacketDownV1;
-    fn transaction_id(&self) -> TransactionID;
-    fn http_body(&self, settings: &RoamingSettings) -> Option<String>;
-}
-
-pub type PacketDown = Box<dyn PacketDownTrait + Send + Sync>;
-
-impl core::fmt::Debug for PacketDown {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PacketDown")
-    }
+#[derive(Debug, Clone)]
+pub struct PacketDown {
+    pub downlink: PacketRouterPacketDownV1,
+    pub gateway_b58: GatewayB58,
+    pub http_response: Option<serde_json::Value>,
 }
 
 #[derive(Debug)]
 pub enum HttpPayloadResp {
-    Downlink(Box<dyn PacketDownTrait + Send + Sync>),
+    Downlink(PacketDown),
     Noop,
 }
 
-pub fn parse_http_payload(value: serde_json::Value) -> Result<HttpPayloadResp> {
+pub fn parse_http_payload(
+    value: serde_json::Value,
+    settings: &RoamingSettings,
+) -> Result<Option<PacketDown>> {
     use serde_json::from_value;
 
     if let Ok(pr_start) = from_value::<PRStartAns>(value.clone()) {
-        return Ok(HttpPayloadResp::Downlink(Box::new(pr_start)));
+        return Ok(Some(PacketDown {
+            downlink: pr_start.to_packet_down(),
+            gateway_b58: pr_start.gateway(),
+            http_response: pr_start.http_body(settings),
+        }));
     }
     if let Ok(xmit) = from_value::<XmitDataReq>(value.clone()) {
-        return Ok(HttpPayloadResp::Downlink(Box::new(xmit)));
+        return Ok(Some(PacketDown {
+            downlink: xmit.to_packet_down(),
+            gateway_b58: xmit.gateway(),
+            http_response: xmit.http_body(settings),
+        }));
     }
     if let Ok(plain) = from_value::<PRStartAnsPlain>(value.clone()) {
         tracing::trace!(?plain, "no downlink");
-        return Ok(HttpPayloadResp::Noop);
+        return Ok(None);
     }
 
     tracing::warn!(?value, "could not parse");
@@ -59,7 +59,17 @@ fn add_delay(timestamp: u64, add: u64) -> u64 {
     ((timestamp + add) as u32) as u64
 }
 
-impl PacketDownTrait for PRStartAns {
+pub trait ToPacketDown {
+    fn payload(&self) -> Vec<u8> {
+        hex::decode(self.phy_payload()).expect("encoded payload")
+    }
+    fn phy_payload(&self) -> String;
+    fn gateway(&self) -> GatewayB58;
+    fn to_packet_down(&self) -> PacketRouterPacketDownV1;
+    fn http_body(&self, settings: &RoamingSettings) -> Option<serde_json::Value>;
+}
+
+impl ToPacketDown for PRStartAns {
     fn phy_payload(&self) -> String {
         self.phy_payload.clone()
     }
@@ -80,34 +90,27 @@ impl PacketDownTrait for PRStartAns {
         }
     }
 
-    fn transaction_id(&self) -> TransactionID {
-        self.transaction_id
-    }
-
     /// PRStartReq was a join_request,
     /// PRStartAns was a join_accept,
     /// PRStartNotif, the join_accept was forwarded to the gateway.
-    fn http_body(&self, settings: &RoamingSettings) -> Option<String> {
+    fn http_body(&self, settings: &RoamingSettings) -> Option<serde_json::Value> {
         if !settings.send_pr_start_notif {
             return None;
         }
-        Some(
-            serde_json::to_string(&serde_json::json!({
-                "ProtocolVersion": "1.1",
-                "SenderID": settings.helium_net_id,
-                "ReceiverID": settings.target_net_id,
-                "TransactionID": self.transaction_id,
-                "MessageType": "PRStartNotif",
-                "SenderNSID": settings.sender_nsid,
-                "ReceiverNSID": settings.receiver_nsid,
-                "Result": {"ResultCode": "Success"}
-            }))
-            .expect("pr_start_notif json"),
-        )
+        Some(serde_json::json!({
+            "ProtocolVersion": "1.1",
+            "SenderID": settings.helium_net_id,
+            "ReceiverID": settings.target_net_id,
+            "TransactionID": self.transaction_id,
+            "MessageType": "PRStartNotif",
+            "SenderNSID": settings.sender_nsid,
+            "ReceiverNSID": settings.receiver_nsid,
+            "Result": {"ResultCode": "Success"}
+        }))
     }
 }
 
-impl PacketDownTrait for XmitDataReq {
+impl ToPacketDown for XmitDataReq {
     fn phy_payload(&self) -> String {
         self.phy_payload.clone()
     }
@@ -135,25 +138,18 @@ impl PacketDownTrait for XmitDataReq {
         }
     }
 
-    fn transaction_id(&self) -> TransactionID {
-        self.transaction_id
-    }
-
     /// Downlink was received and forwarded to the gateway.
-    fn http_body(&self, settings: &RoamingSettings) -> Option<String> {
-        Some(
-            serde_json::to_string(&serde_json::json!({
-                "ProtocolVersion": "1.1",
-                "MessageType": "XmitDataAns",
-                "SenderID": settings.helium_net_id,
-                "ReceiverID": settings.target_net_id,
-                "SenderNSID": settings.sender_nsid,
-                "ReceiverNSID": settings.receiver_nsid,
-                "TransactionID": self.transaction_id,
-                "Result": {"ResultCode": "Success"},
-            }))
-            .expect("xmit_data_ans json"),
-        )
+    fn http_body(&self, settings: &RoamingSettings) -> Option<serde_json::Value> {
+        Some(serde_json::json!({
+            "ProtocolVersion": "1.1",
+            "MessageType": "XmitDataAns",
+            "SenderID": settings.helium_net_id,
+            "ReceiverID": settings.target_net_id,
+            "SenderNSID": settings.sender_nsid,
+            "ReceiverNSID": settings.receiver_nsid,
+            "TransactionID": self.transaction_id,
+            "Result": {"ResultCode": "Success"},
+        }))
     }
 }
 
@@ -163,9 +159,17 @@ impl DLMetaData {
             .expect("valid dr")
             .into()
     }
+
+    fn rx_delay(&self) -> Option<u64> {
+        match self.fns_ul_token.packet_type {
+            ul_token::PacketType::Join => Some(5),
+            ul_token::PacketType::Data => self.rx_delay_1,
+        }
+    }
+
     fn rx1_window(&self, timestamp: u64) -> Option<WindowV1> {
         if let (Some(freq), Some(data_rate), Some(mut rx_delay)) =
-            (self.dl_freq_1, self.data_rate_1, self.rx_delay_1)
+            (self.dl_freq_1, self.data_rate_1, self.rx_delay())
         {
             if rx_delay < 2 {
                 rx_delay = 1;
@@ -179,9 +183,10 @@ impl DLMetaData {
         }
         None
     }
+
     fn rx2_window(&self, timestamp: u64) -> Option<WindowV1> {
         if let (Some(freq), Some(data_rate), Some(mut rx_delay)) =
-            (self.dl_freq_2, self.data_rate_2, self.rx_delay_1)
+            (self.dl_freq_2, self.data_rate_2, self.rx_delay())
         {
             if rx_delay < 2 {
                 rx_delay = 1;
@@ -301,16 +306,37 @@ pub struct DLMetaData {
 
 #[cfg(test)]
 mod test {
-    use super::HttpPayloadResp;
+    use super::PacketDown;
     use crate::{
-        downlink::{parse_http_payload, PRStartAns, PacketDownTrait},
+        downlink::{PRStartAns, ToPacketDown},
         region::{downlink_datarate, Region},
-        ul_token::make_token,
+        settings::RoamingSettings,
+        ul_token::{make_data_token, make_join_token},
+        Result,
     };
+    use duration_string::DurationString;
     use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
+    use std::time::Duration;
+
+    impl Default for RoamingSettings {
+        fn default() -> Self {
+            Self {
+                helium_net_id: Default::default(),
+                target_net_id: Default::default(),
+                sender_nsid: Default::default(),
+                receiver_nsid: Default::default(),
+                dedup_window: DurationString::new(Duration::from_millis(1250)),
+                send_pr_start_notif: Default::default(),
+            }
+        }
+    }
+
+    fn parse_http_payload(value: serde_json::Value) -> Result<Option<PacketDown>> {
+        super::parse_http_payload(value, &RoamingSettings::default())
+    }
 
     fn join_accept_payload() -> serde_json::Value {
-        let token = make_token("test-gateway".to_string(), 100, Region::Us915);
+        let token = make_join_token("test-gateway".to_string(), 100, Region::Us915);
         serde_json::json!({
             "ProtocolVersion": "1.1",
             "SenderID": "000024",
@@ -335,7 +361,7 @@ mod test {
                 "Confirmed": false,
                 "DLFreq1": 925.1,
                 "DLFreq2": 923.3,
-                "RXDelay1": 5,
+                "RXDelay1": 3,
                 "ClassMode": "A",
                 "DataRate1": 10,
                 "DataRate2": 8,
@@ -348,7 +374,7 @@ mod test {
     }
 
     fn unconfirmed_downlink_payload() -> serde_json::Value {
-        let token = make_token("test-gateway".to_string(), 100, Region::Us915);
+        let token = make_data_token("test-gateway".to_string(), 100, Region::Us915);
         serde_json::json!({
             "ProtocolVersion":"1.1",
             "SenderID":"000024",
@@ -401,7 +427,7 @@ mod test {
             "ServiceProfile": null,
             "DLMetaData": null
         });
-        let HttpPayloadResp::Noop = parse_http_payload(value).expect("parseable") else { panic!("A downlink") };
+        assert!(parse_http_payload(value).expect("parseable").is_none());
     }
 
     #[test]
@@ -425,7 +451,7 @@ mod test {
     #[test]
     fn join_accept_rx_1_and_2() {
         let value = join_accept_payload();
-        let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
+        let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
 
         assert_eq!(
             PacketRouterPacketDownV1 {
@@ -446,15 +472,15 @@ mod test {
                     immediate: false
                 })
             },
-            downlink.to_packet_down()
+            packet_down.downlink
         );
     }
 
     #[test]
     fn join_accept_rx1_only() {
-        let token = make_token("test-gateway".to_string(), 100, Region::Eu868);
+        let token = make_join_token("test-gateway".to_string(), 100, Region::Eu868);
         let value = serde_json::json!({"ProtocolVersion":"1.1","SenderNSID":"f03d290000000101","ReceiverNSID":"6081fffe12345678","SenderID":"600013","ReceiverID":"c00053","TransactionID":1152841626,"MessageType":"PRStartAns","Result":{"ResultCode":"Success"},"Lifetime":0,"DevEUI":"0018b20000002487","SenderToken":"0108f03d290000000101","PHYPayload":"202cf4a93d978c060233bbaa88d20f48673136ea147f5ad92e8b015a581a8d74cc","DLMetaData":{"DevEUI":"0018b20000002487","RXDelay1":5,"DLFreq1":869.525,"DataRate1":0,"FNSULToken":token,"ClassMode":"A","HiPriorityFlag":false}});
-        let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("not a downlink") };
+        let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("not a downlink") };
         assert_eq!(
             PacketRouterPacketDownV1 {
                 payload: vec![
@@ -469,15 +495,15 @@ mod test {
                 }),
                 rx2: None,
             },
-            downlink.to_packet_down()
+            packet_down.downlink
         );
     }
 
     #[test]
     fn join_accept_rx2_only() {
-        let token = make_token("test-gateway".to_string(), 100, Region::Eu868);
+        let token = make_join_token("test-gateway".to_string(), 100, Region::Eu868);
         let value = serde_json::json!({"ProtocolVersion":"1.1","SenderNSID":"f03d290000000101","ReceiverNSID":"6081fffe12345678","SenderID":"600013","ReceiverID":"c00053","TransactionID":1152841626,"MessageType":"PRStartAns","Result":{"ResultCode":"Success"},"Lifetime":0,"DevEUI":"0018b20000002487","SenderToken":"0108f03d290000000101","PHYPayload":"202cf4a93d978c060233bbaa88d20f48673136ea147f5ad92e8b015a581a8d74cc","DLMetaData":{"DevEUI":"0018b20000002487","RXDelay1":5,"DLFreq2":869.525,"DataRate2":0,"FNSULToken":token,"ClassMode":"A","HiPriorityFlag":false}});
-        let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("not a downlink") };
+        let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("not a downlink") };
         assert_eq!(
             PacketRouterPacketDownV1 {
                 payload: vec![
@@ -492,14 +518,14 @@ mod test {
                     immediate: false
                 })
             },
-            downlink.to_packet_down()
+            packet_down.downlink
         );
     }
 
     #[test]
     fn xmit_rx_1_and_2() {
         let value = unconfirmed_downlink_payload();
-        let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
+        let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
 
         assert_eq!(
             PacketRouterPacketDownV1 {
@@ -520,15 +546,15 @@ mod test {
                     immediate: false,
                 }),
             },
-            downlink.to_packet_down()
+            packet_down.downlink
         );
     }
 
     #[test]
     fn xmit_rx1_only() {
-        let token = make_token("test-gateway".to_string(), 100, Region::Us915);
+        let token = make_data_token("test-gateway".to_string(), 100, Region::Us915);
         let value = serde_json::json!({ "ProtocolVersion":"1.1", "SenderID":"000024", "ReceiverID":"c00053", "TransactionID":274631693, "MessageType":"XmitDataReq", "PHYPayload":"6073000048ab00000300020070030000ff01063d32ce60", "ULMetaData":null, "DLMetaData":{ "DevEUI":"0000000000000003", "FPort":null, "FCntDown":null, "Confirmed":false, "DLFreq1":926.9, "RXDelay1":1, "ClassMode":"A", "DataRate1":10, "FNSULToken":token, "GWInfo":[{ "FineRecvTime":null, "RSSI":null, "SNR":null, "Lat":null, "Lon":null, "DLAllowed":null }], "HiPriorityFlag":false} } );
-        let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
+        let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
 
         assert_eq!(
             PacketRouterPacketDownV1 {
@@ -544,15 +570,15 @@ mod test {
                 }),
                 rx2: None,
             },
-            downlink.to_packet_down()
+            packet_down.downlink
         );
     }
 
     #[test]
     fn xmit_x2_only() {
-        let token = make_token("test-gateway".to_string(), 100, Region::Us915);
+        let token = make_data_token("test-gateway".to_string(), 100, Region::Us915);
         let value = serde_json::json!({ "ProtocolVersion":"1.1", "SenderID":"000024", "ReceiverID":"c00053", "TransactionID":274631693, "MessageType":"XmitDataReq", "PHYPayload":"6073000048ab00000300020070030000ff01063d32ce60", "ULMetaData":null, "DLMetaData":{ "DevEUI":"0000000000000003", "FPort":null, "FCntDown":null, "Confirmed":false, "DLFreq2":923.3, "RXDelay1":1, "ClassMode":"A", "DataRate2":8, "FNSULToken":token, "GWInfo":[{ "FineRecvTime":null, "RSSI":null, "SNR":null, "Lat":null, "Lon":null, "DLAllowed":null }], "HiPriorityFlag":false} } );
-        let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
+        let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
 
         assert_eq!(
             PacketRouterPacketDownV1 {
@@ -568,13 +594,13 @@ mod test {
                     immediate: false,
                 }),
             },
-            downlink.to_packet_down()
+            packet_down.downlink
         );
     }
 
     #[test]
     fn xmit_class_c() {
-        let token = make_token("test-gateway".to_string(), 100, Region::Us915);
+        let token = make_data_token("test-gateway".to_string(), 100, Region::Us915);
         let value = serde_json::json!({
             "ProtocolVersion":"1.1",
             "SenderID":"000024",
@@ -604,7 +630,7 @@ mod test {
                 "HiPriorityFlag":false}
             }
         );
-        let HttpPayloadResp::Downlink(downlink) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
+        let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
 
         assert_eq!(
             PacketRouterPacketDownV1 {
@@ -620,7 +646,7 @@ mod test {
                 }),
                 rx2: None,
             },
-            downlink.to_packet_down()
+            packet_down.downlink
         );
     }
 }

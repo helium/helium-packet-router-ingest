@@ -152,45 +152,6 @@ pub async fn handle_single_message(app: &mut App) -> UpdateAction {
     handle_message(app, message).await
 }
 
-pub async fn handle_update_action(app: &App, action: UpdateAction) {
-    match action {
-        UpdateAction::Noop => {}
-        UpdateAction::StartTimerForNewPacket(hash) => {
-            let dedup = app.settings.roaming.dedup_window.into();
-            let cleanup = app.settings.cleanup_window.into();
-            let sender = app.message_tx.clone();
-            tokio::spawn(async move {
-                use tokio::time::sleep;
-                sleep(dedup).await;
-                sender.uplink_send(hash.clone()).await;
-                sleep(cleanup).await;
-                sender.uplink_cleanup(hash).await;
-            });
-        }
-        UpdateAction::SendDownlink(gw_tx, downlink) => {
-            gw_tx.send_downlink(downlink.to_packet_down()).await;
-            tracing::info!(gw = downlink.gateway(), "downlink sent");
-
-            if let Some(body) = downlink.http_body(&app.settings.roaming) {
-                let res = reqwest::Client::new()
-                    .post(app.settings.network.lns_endpoint.clone())
-                    .body(body.clone())
-                    .send()
-                    .await;
-                tracing::info!(?body, ?res, "post");
-            }
-        }
-        UpdateAction::SendUplink(body) => {
-            let res = reqwest::Client::new()
-                .post(app.settings.network.lns_endpoint.clone())
-                .body(body.clone())
-                .send()
-                .await;
-            tracing::info!(?body, ?res, "post");
-        }
-    }
-}
-
 async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
     match msg {
         Msg::UplinkReceive(packet) => match app.deduplicator.handle_packet(packet) {
@@ -217,16 +178,13 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
             app.deduplicator.remove_packets(&packet_hash);
             UpdateAction::Noop
         }
-        Msg::Downlink(source) => {
-            let gw = source.gateway();
-            match app.gateway_map.get(&gw) {
-                None => {
-                    tracing::warn!(?gw, "join accept for unknown gateway");
-                    UpdateAction::Noop
-                }
-                Some(gateway) => UpdateAction::SendDownlink(gateway.clone(), source),
+        Msg::Downlink(source) => match app.gateway_map.get(&source.gateway_b58) {
+            None => {
+                tracing::warn!(gw = source.gateway_b58, "join accept for unknown gateway");
+                UpdateAction::Noop
             }
-        }
+            Some(gateway) => UpdateAction::SendDownlink(gateway.clone(), source),
+        },
         Msg::GatewayConnect(gw, sender) => {
             let _prev_val = app.gateway_map.insert(gw, sender);
             tracing::info!(size = app.gateway_map.len(), "gateway connect");
@@ -236,6 +194,45 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
             let _prev_val = app.gateway_map.remove(&gw);
             tracing::info!(size = app.gateway_map.len(), "gateway disconnect");
             UpdateAction::Noop
+        }
+    }
+}
+
+pub async fn handle_update_action(app: &App, action: UpdateAction) {
+    match action {
+        UpdateAction::Noop => {}
+        UpdateAction::StartTimerForNewPacket(hash) => {
+            let dedup = app.settings.roaming.dedup_window.into();
+            let cleanup = app.settings.cleanup_window.into();
+            let sender = app.message_tx.clone();
+            tokio::spawn(async move {
+                use tokio::time::sleep;
+                sleep(dedup).await;
+                sender.uplink_send(hash.clone()).await;
+                sleep(cleanup).await;
+                sender.uplink_cleanup(hash).await;
+            });
+        }
+        UpdateAction::SendDownlink(gw_tx, packet_down) => {
+            gw_tx.send_downlink(packet_down.downlink).await;
+            tracing::info!(gw = packet_down.gateway_b58, "downlink sent");
+
+            if let Some(body) = packet_down.http_response {
+                let res = reqwest::Client::new()
+                    .post(app.settings.network.lns_endpoint.clone())
+                    .body(body.to_string())
+                    .send()
+                    .await;
+                tracing::info!(?body, ?res, "post");
+            }
+        }
+        UpdateAction::SendUplink(body) => {
+            let res = reqwest::Client::new()
+                .post(app.settings.network.lns_endpoint.clone())
+                .body(body.clone())
+                .send()
+                .await;
+            tracing::info!(?body, ?res, "post");
         }
     }
 }

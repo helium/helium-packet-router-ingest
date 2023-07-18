@@ -1,5 +1,5 @@
 use crate::region;
-use crate::ul_token::make_token;
+use crate::ul_token::{make_data_token, make_join_token};
 use crate::{settings::RoamingSettings, Result};
 use helium_crypto::PublicKeyBinary;
 use helium_proto::services::router::PacketRouterPacketUpV1;
@@ -51,9 +51,17 @@ pub trait PacketUpTrait {
 pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Result<String> {
     let packet = packets.first().expect("at least one packet");
 
-    let (routing_key, routing_value) = match packet.routing_info() {
-        RoutingInfo::Eui { dev, .. } => ("DevEUI", dev),
-        RoutingInfo::DevAddr(devaddr) => ("DevAddr", devaddr),
+    let (routing_key, routing_value, token) = match packet.routing_info() {
+        RoutingInfo::Eui { dev, .. } => (
+            "DevEUI",
+            dev,
+            make_join_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
+        ),
+        RoutingInfo::DevAddr(devaddr) => (
+            "DevAddr",
+            devaddr,
+            make_data_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
+        ),
         RoutingInfo::Unknown => todo!("should never get here"),
     };
 
@@ -83,7 +91,7 @@ pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Resu
             "ULFreq": packet.frequency_mhz(),
             "RecvTime": packet.recv_time(),
             "RFRegion": packet.region(),
-            "FNSULToken": make_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
+            "FNSULToken": token,
             "GWCnt": packets.len(),
             "GWInfo": gw_info
         }

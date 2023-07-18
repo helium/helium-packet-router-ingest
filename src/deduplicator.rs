@@ -1,6 +1,7 @@
 use crate::uplink::{PacketHash, PacketUp, PacketUpTrait};
 use std::collections::HashMap;
 
+#[derive(Default)]
 pub struct Deduplicator {
     pub packets: HashMap<PacketHash, Vec<PacketUp>>,
 }

@@ -58,9 +58,9 @@ pub async fn run(settings: Settings) {
     let (sender, receiver) = MsgSender::new();
 
     let _ = tokio::try_join!(
-        app::start(sender.clone(), receiver, settings),
+        app::start(sender.clone(), receiver, settings.clone()),
         uplink_ingest::start(sender.clone(), grpc_listen_addr),
-        downlink_ingest::start(sender.clone(), http_listen_addr)
+        downlink_ingest::start(sender.clone(), http_listen_addr, settings.roaming)
     );
 }
 

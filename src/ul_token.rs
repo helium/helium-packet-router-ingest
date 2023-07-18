@@ -7,6 +7,13 @@ pub struct Token {
     pub timestamp: u64,
     pub gateway: GatewayB58,
     pub region: Region,
+    pub packet_type: PacketType,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub enum PacketType {
+    Join,
+    Data,
 }
 
 impl FromHex for Token {
@@ -18,11 +25,22 @@ impl FromHex for Token {
     }
 }
 
-pub fn make_token(gateway: GatewayB58, timestamp: u64, region: Region) -> String {
+pub fn make_join_token(gateway: GatewayB58, timestamp: u64, region: Region) -> String {
     let token = Token {
         gateway,
         timestamp,
         region,
+        packet_type: PacketType::Join,
+    };
+    hex::encode(serde_json::to_string(&token).unwrap())
+}
+
+pub fn make_data_token(gateway: GatewayB58, timestamp: u64, region: Region) -> String {
+    let token = Token {
+        gateway,
+        timestamp,
+        region,
+        packet_type: PacketType::Data,
     };
     hex::encode(serde_json::to_string(&token).unwrap())
 }

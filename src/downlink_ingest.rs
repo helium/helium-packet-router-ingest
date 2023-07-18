@@ -1,4 +1,4 @@
-use crate::{app::MsgSender, downlink};
+use crate::{app::MsgSender, downlink, settings::RoamingSettings};
 use axum::{
     extract,
     response::IntoResponse,
@@ -10,12 +10,16 @@ use std::net::SocketAddr;
 use tracing::instrument;
 
 #[instrument]
-pub fn start(sender: MsgSender, addr: SocketAddr) -> tokio::task::JoinHandle<()> {
+pub fn start(
+    sender: MsgSender,
+    addr: SocketAddr,
+    settings: RoamingSettings,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let app = Router::new()
             .route("/api/downlink", post(downlink_post))
             .route("/health", get(|| async { "ok" }))
-            .layer(Extension(sender));
+            .layer(Extension((sender, settings)));
 
         tracing::debug!(?addr, "setup");
         axum::Server::bind(&addr)
@@ -26,17 +30,17 @@ pub fn start(sender: MsgSender, addr: SocketAddr) -> tokio::task::JoinHandle<()>
 }
 
 async fn downlink_post(
-    sender: Extension<MsgSender>,
+    Extension((sender, settings)): Extension<(MsgSender, RoamingSettings)>,
     extract::Json(downlink): extract::Json<serde_json::Value>,
 ) -> impl IntoResponse {
     tracing::info!(?downlink, "http downlink");
-    match downlink::parse_http_payload(downlink) {
+    match downlink::parse_http_payload(downlink, &settings) {
         Ok(resp) => match resp {
-            downlink::HttpPayloadResp::Downlink(downlink) => {
-                sender.downlink(downlink).await;
+            Some(packet_down) => {
+                sender.downlink(packet_down).await;
                 (StatusCode::ACCEPTED, "Downlink Accepted")
             }
-            downlink::HttpPayloadResp::Noop => (StatusCode::ACCEPTED, "Answer Accepted"),
+            None => (StatusCode::ACCEPTED, "Answer Accepted"),
         },
         Err(_err) => (StatusCode::BAD_REQUEST, "Unknown"),
     }
