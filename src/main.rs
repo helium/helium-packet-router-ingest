@@ -16,10 +16,8 @@ struct Cli {
 
 #[derive(Debug, Clone, clap::Subcommand)]
 enum Commands {
-    /// Run the program with command line arguments you provide
-    Serve(Settings),
     /// Run the program with a toml settings file.
-    ServeConfig { path: PathBuf },
+    Serve { path: PathBuf },
 }
 
 #[tokio::main]
@@ -30,8 +28,7 @@ async fn main() {
     tracing::debug!(?cli, "opts");
 
     match cli.command {
-        Commands::Serve(settings) => run(settings).await,
-        Commands::ServeConfig { path } => {
+        Commands::Serve { path } => {
             let settings = settings::from_path(path);
             run(settings).await
         }
