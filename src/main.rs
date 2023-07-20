@@ -17,7 +17,7 @@ struct Cli {
 #[derive(Debug, Clone, clap::Subcommand)]
 enum Commands {
     /// Run the program with a toml settings file.
-    Serve { path: PathBuf },
+    Serve { path: Option<PathBuf> },
 }
 
 #[tokio::main]
