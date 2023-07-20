@@ -1,8 +1,10 @@
 use duration_string::DurationString;
-use helium_proto::services::router::PacketRouterPacketUpV1;
+use helium_proto::{services::router::PacketRouterPacketUpV1, Region};
 use hpr_http_rs::{
     app::{self, MsgSender, UpdateAction},
+    downlink::{parse_http_payload, HttpResponseResult},
     settings::{NetworkSettings, RoamingSettings, Settings},
+    ul_token::make_join_token,
     uplink::{PacketUp, PacketUpTrait},
     uplink_ingest::GatewayTx,
     Result,
@@ -102,7 +104,7 @@ async fn sending_packet() -> Result {
     assert_eq!(1, app.current_packet_count());
 
     match app::handle_single_message(&mut app).await {
-        UpdateAction::SendUplink(_json_body) => (),
+        UpdateAction::UplinkSend(_json_body) => (),
         a => anyhow::bail!("expected send uplink from known packet hash: {a:?}"),
     }
 
@@ -142,6 +144,58 @@ async fn cleanup_packet() -> Result {
         _ => anyhow::bail!("expected no action from known packet hash"),
     }
     assert_eq!(0, app.current_packet_count());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn send_downlink_to_known_gateway() -> Result {
+    let (tx, mut app) = make_app();
+
+    let (gw_tx, _gw_rx) = tokio::sync::mpsc::channel(1);
+
+    let (downlink, http_response) =
+        parse_http_payload(join_accept_payload(), &app.settings.roaming)
+            .expect("result parseable")
+            .expect("option contains downlink");
+
+    // Gateway Connect
+    tx.gateway_connect(downlink.gateway_b58.clone(), GatewayTx(gw_tx))
+        .await;
+
+    app::handle_single_message(&mut app).await;
+    assert_eq!(1, app.gateway_count());
+
+    tx.downlink(downlink, http_response).await;
+    match app::handle_single_message(&mut app).await {
+        UpdateAction::DownlinkSend(_gw_chan, packet_down, http_response) => {
+            assert_eq!(HttpResponseResult::Success, http_response.result);
+            assert_eq!(packet_down, packet_down);
+        }
+        x => anyhow::bail!("expected downlink action got: {x:?}"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn downlink_to_unknown_gateway_responds_error() -> Result {
+    let (tx, mut app) = make_app();
+
+    let (downlink, http_response) =
+        parse_http_payload(join_accept_payload(), &app.settings.roaming)
+            .expect("result parseable")
+            .expect("option contains downlink");
+
+    assert_eq!(0, app.gateway_count());
+
+    tx.downlink(downlink, http_response).await;
+    match app::handle_single_message(&mut app).await {
+        UpdateAction::DownlinkError(http_response) => {
+            assert_eq!(HttpResponseResult::XmitFailed, http_response.result);
+        }
+        x => anyhow::bail!("expected downlink action got: {x:?}"),
+    }
 
     Ok(())
 }
@@ -194,4 +248,42 @@ fn default_settings() -> Settings {
         cleanup_window: DurationString::from_string("10s".to_string()).unwrap(),
         metrics_listen: "0.0.0.0:9002".parse().unwrap(),
     }
+}
+
+fn join_accept_payload() -> serde_json::Value {
+    let token = make_join_token("test-gateway".to_string(), 100, Region::Us915);
+    serde_json::json!({
+        "ProtocolVersion": "1.1",
+        "SenderID": "000024",
+        "ReceiverID": "c00053",
+        "TransactionID":  193858937,
+        "MessageType": "PRStartAns",
+        "Result": {"ResultCode": "Success"},
+        "PHYPayload": "209c7848d681b589da4b8e5544460a693383bb7e5d47b849ef0d290bafb20872ae",
+        "DevEUI": "0000000000000003",
+        "Lifetime": null,
+        "FNwkSIntKey": null,
+        "NwkSKey": {
+            "KEKLabel": "",
+            "AESKey": "0e2baf26327308e63afe62be15edea6a"
+        },
+        "FCntUp": 0,
+        "ServiceProfile": null,
+        "DLMetaData": {
+            "DevEUI": "0000000000000003",
+            "FPort": null,
+            "FCntDown": null,
+            "Confirmed": false,
+            "DLFreq1": 925.1,
+            "DLFreq2": 923.3,
+            "RXDelay1": 3,
+            "ClassMode": "A",
+            "DataRate1": 10,
+            "DataRate2": 8,
+            "FNSULToken": token,
+            "GWInfo": [{"FineRecvTime": null,"RSSI": null,"SNR": null,"Lat": null,"Lon": null,"DLAllowed": null}],
+          "HiPriorityFlag": false
+        },
+        "DevAddr": "48000037"
+    })
 }

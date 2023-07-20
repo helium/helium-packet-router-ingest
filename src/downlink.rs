@@ -7,38 +7,35 @@ use crate::{
 };
 use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PacketDown {
     pub downlink: PacketRouterPacketDownV1,
     pub gateway_b58: GatewayB58,
-    pub http_response: Option<serde_json::Value>,
-}
-
-#[derive(Debug)]
-pub enum HttpPayloadResp {
-    Downlink(PacketDown),
-    Noop,
 }
 
 pub fn parse_http_payload(
     value: serde_json::Value,
     settings: &RoamingSettings,
-) -> Result<Option<PacketDown>> {
+) -> Result<Option<(PacketDown, HttpResponse)>> {
     use serde_json::from_value;
 
     if let Ok(pr_start) = from_value::<PRStartAns>(value.clone()) {
-        return Ok(Some(PacketDown {
-            downlink: pr_start.to_packet_down(),
-            gateway_b58: pr_start.gateway(),
-            http_response: pr_start.http_body(settings),
-        }));
+        return Ok(Some((
+            PacketDown {
+                downlink: pr_start.to_packet_down(),
+                gateway_b58: pr_start.gateway(),
+            },
+            pr_start.http_body(settings),
+        )));
     }
     if let Ok(xmit) = from_value::<XmitDataReq>(value.clone()) {
-        return Ok(Some(PacketDown {
-            downlink: xmit.to_packet_down(),
-            gateway_b58: xmit.gateway(),
-            http_response: xmit.http_body(settings),
-        }));
+        return Ok(Some((
+            PacketDown {
+                downlink: xmit.to_packet_down(),
+                gateway_b58: xmit.gateway(),
+            },
+            xmit.http_body(settings),
+        )));
     }
     if let Ok(plain) = from_value::<PRStartAnsPlain>(value.clone()) {
         tracing::trace!(?plain, "no downlink");
@@ -49,16 +46,6 @@ pub fn parse_http_payload(
     anyhow::bail!("unparseable message");
 }
 
-pub fn mhz_to_hz(mhz: f64) -> u32 {
-    // NOTE: f64 is important, if it goes down to f32 we start to see rounding errors.
-    (mhz * 1_000_000.0) as u32
-}
-
-/// Timestamp value needs to be truncated into u32 space
-fn add_delay(timestamp: u64, add: u64) -> u64 {
-    ((timestamp + add) as u32) as u64
-}
-
 pub trait ToPacketDown {
     fn payload(&self) -> Vec<u8> {
         hex::decode(self.phy_payload()).expect("encoded payload")
@@ -66,7 +53,7 @@ pub trait ToPacketDown {
     fn phy_payload(&self) -> String;
     fn gateway(&self) -> GatewayB58;
     fn to_packet_down(&self) -> PacketRouterPacketDownV1;
-    fn http_body(&self, settings: &RoamingSettings) -> Option<serde_json::Value>;
+    fn http_body(&self, settings: &RoamingSettings) -> HttpResponse;
 }
 
 impl ToPacketDown for PRStartAns {
@@ -93,20 +80,17 @@ impl ToPacketDown for PRStartAns {
     /// PRStartReq was a join_request,
     /// PRStartAns was a join_accept,
     /// PRStartNotif, the join_accept was forwarded to the gateway.
-    fn http_body(&self, settings: &RoamingSettings) -> Option<serde_json::Value> {
-        if !settings.send_pr_start_notif {
-            return None;
+    fn http_body(&self, settings: &RoamingSettings) -> HttpResponse {
+        HttpResponse {
+            protocol_version: "1.1".to_string(),
+            sender_id: settings.helium_net_id.clone(),
+            receiver_id: settings.target_net_id.clone(),
+            transaction_id: self.transaction_id,
+            message_type: HttpResponseMessageType::PRStartNotif,
+            sender_nsid: settings.sender_nsid.clone(),
+            receiver_nsid: settings.receiver_nsid.clone(),
+            result: HttpResponseResult::Success,
         }
-        Some(serde_json::json!({
-            "ProtocolVersion": "1.1",
-            "SenderID": settings.helium_net_id,
-            "ReceiverID": settings.target_net_id,
-            "TransactionID": self.transaction_id,
-            "MessageType": "PRStartNotif",
-            "SenderNSID": settings.sender_nsid,
-            "ReceiverNSID": settings.receiver_nsid,
-            "Result": {"ResultCode": "Success"}
-        }))
     }
 }
 
@@ -139,17 +123,17 @@ impl ToPacketDown for XmitDataReq {
     }
 
     /// Downlink was received and forwarded to the gateway.
-    fn http_body(&self, settings: &RoamingSettings) -> Option<serde_json::Value> {
-        Some(serde_json::json!({
-            "ProtocolVersion": "1.1",
-            "MessageType": "XmitDataAns",
-            "SenderID": settings.helium_net_id,
-            "ReceiverID": settings.target_net_id,
-            "SenderNSID": settings.sender_nsid,
-            "ReceiverNSID": settings.receiver_nsid,
-            "TransactionID": self.transaction_id,
-            "Result": {"ResultCode": "Success"},
-        }))
+    fn http_body(&self, settings: &RoamingSettings) -> HttpResponse {
+        HttpResponse {
+            protocol_version: "1.1".to_string(),
+            sender_id: settings.helium_net_id.clone(),
+            receiver_id: settings.target_net_id.clone(),
+            transaction_id: self.transaction_id,
+            message_type: HttpResponseMessageType::XmitDataAns,
+            sender_nsid: settings.sender_nsid.clone(),
+            receiver_nsid: settings.receiver_nsid.clone(),
+            result: HttpResponseResult::Success,
+        }
     }
 }
 
@@ -211,6 +195,67 @@ impl DLMetaData {
             });
         }
         None
+    }
+}
+
+pub fn mhz_to_hz(mhz: f64) -> u32 {
+    // NOTE: f64 is important, if it goes down to f32 we start to see rounding errors.
+    (mhz * 1_000_000.0) as u32
+}
+
+fn add_delay(timestamp: u64, add: u64) -> u64 {
+    // Timestamp value needs to be truncated into u32 space
+    ((timestamp + add) as u32) as u64
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct HttpResponse {
+    #[serde(rename = "ProtocolVersion")]
+    pub protocol_version: String,
+    #[serde(rename = "MessageType")]
+    pub message_type: HttpResponseMessageType,
+    #[serde(rename = "SenderID")]
+    pub sender_id: String,
+    #[serde(rename = "ReceiverID")]
+    pub receiver_id: String,
+    #[serde(rename = "TransactionID")]
+    pub transaction_id: u64,
+    #[serde(rename = "SenderNSID")]
+    pub sender_nsid: String,
+    #[serde(rename = "ReceiverNSID")]
+    pub receiver_nsid: String,
+    #[serde(rename = "Result")]
+    pub result: HttpResponseResult,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub enum HttpResponseMessageType {
+    PRStartNotif,
+    XmitDataAns,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "ResultCode")]
+pub enum HttpResponseResult {
+    Success,
+    MICFailed,
+    XmitFailed,
+}
+
+impl HttpResponse {
+    pub fn success(mut self) -> Self {
+        self.result = HttpResponseResult::Success;
+        self
+    }
+
+    pub fn mic_failed(mut self) -> Self {
+        self.result = HttpResponseResult::MICFailed;
+        self
+    }
+
+    pub fn xmit_failed(mut self) -> Self {
+        self.result = HttpResponseResult::XmitFailed;
+        self
     }
 }
 
@@ -333,6 +378,7 @@ mod test {
 
     fn parse_http_payload(value: serde_json::Value) -> Result<Option<PacketDown>> {
         super::parse_http_payload(value, &RoamingSettings::default())
+            .map(|parsed| parsed.map(|inner| inner.0))
     }
 
     fn join_accept_payload() -> serde_json::Value {

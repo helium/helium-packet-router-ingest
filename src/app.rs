@@ -1,6 +1,6 @@
 use crate::{
     deduplicator::{Deduplicator, HandlePacket},
-    downlink::PacketDown,
+    downlink::{HttpResponse, HttpResponseMessageType, PacketDown},
     settings::Settings,
     uplink,
     uplink::{GatewayB58, PacketHash, PacketUp},
@@ -12,7 +12,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 pub struct App {
     deduplicator: Deduplicator,
     gateway_map: HashMap<GatewayB58, GatewayTx>,
-    settings: Settings,
+    pub settings: Settings,
     message_tx: MsgSender,
     message_rx: Receiver<Msg>,
 }
@@ -40,7 +40,7 @@ pub enum Msg {
     /// Cleanup timer has elapsed.
     UplinkCleanup(PacketHash),
     /// Downlink received for gateway from HTTP handler.
-    Downlink(PacketDown),
+    Downlink(PacketDown, HttpResponse),
     /// Gateway has Connected.
     GatewayConnect(GatewayB58, GatewayTx),
     /// Gateway has Disconnected.
@@ -90,10 +90,10 @@ impl MsgSender {
             .expect("gateway_disconnect");
     }
 
-    pub async fn downlink(&self, downlink: PacketDown) {
+    pub async fn downlink(&self, downlink: PacketDown, http_response: HttpResponse) {
         metrics::increment_counter!("downlink");
         self.0
-            .send(Msg::Downlink(downlink))
+            .send(Msg::Downlink(downlink, http_response))
             .await
             .expect("downlink");
     }
@@ -104,8 +104,9 @@ impl MsgSender {
 pub enum UpdateAction {
     Noop,
     StartTimerForNewPacket(PacketHash),
-    SendDownlink(GatewayTx, PacketDown),
-    SendUplink(String),
+    DownlinkSend(GatewayTx, PacketDown, HttpResponse),
+    DownlinkError(HttpResponse),
+    UplinkSend(String),
 }
 
 impl App {
@@ -166,7 +167,7 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
             Some(packets) => {
                 tracing::info!(num_packets = packets.len(), "deduplication done");
                 match uplink::make_pr_start_req(packets, &app.settings.roaming) {
-                    Ok(body) => UpdateAction::SendUplink(body),
+                    Ok(body) => UpdateAction::UplinkSend(body),
                     Err(err) => {
                         tracing::warn!(?packet_hash, ?err, "failed to make pr_start_req");
                         UpdateAction::Noop
@@ -178,13 +179,22 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
             app.deduplicator.remove_packets(&packet_hash);
             UpdateAction::Noop
         }
-        Msg::Downlink(source) => match app.gateway_map.get(&source.gateway_b58) {
-            None => {
-                tracing::warn!(gw = source.gateway_b58, "join accept for unknown gateway");
-                UpdateAction::Noop
+        Msg::Downlink(packet_down, http_response) => {
+            match app.gateway_map.get(&packet_down.gateway_b58) {
+                None => {
+                    tracing::warn!(
+                        gw = packet_down.gateway_b58,
+                        "join accept for unknown gateway"
+                    );
+                    UpdateAction::DownlinkError(http_response.xmit_failed())
+                }
+                Some(gateway) => UpdateAction::DownlinkSend(
+                    gateway.clone(),
+                    packet_down,
+                    http_response.success(),
+                ),
             }
-            Some(gateway) => UpdateAction::SendDownlink(gateway.clone(), source),
-        },
+        }
         Msg::GatewayConnect(gw, sender) => {
             let _prev_val = app.gateway_map.insert(gw, sender);
             tracing::info!(size = app.gateway_map.len(), "gateway connect");
@@ -201,6 +211,7 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
 pub async fn handle_update_action(app: &App, action: UpdateAction) {
     match action {
         UpdateAction::Noop => {}
+
         UpdateAction::StartTimerForNewPacket(hash) => {
             let dedup = app.settings.roaming.dedup_window.into();
             let cleanup = app.settings.cleanup_window.into();
@@ -213,20 +224,34 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
                 sender.uplink_cleanup(hash).await;
             });
         }
-        UpdateAction::SendDownlink(gw_tx, packet_down) => {
+        UpdateAction::DownlinkSend(gw_tx, packet_down, http_response) => {
             gw_tx.send_downlink(packet_down.downlink).await;
             tracing::info!(gw = packet_down.gateway_b58, "downlink sent");
 
-            if let Some(body) = packet_down.http_response {
-                let res = reqwest::Client::new()
-                    .post(app.settings.network.lns_endpoint.clone())
-                    .body(body.to_string())
-                    .send()
-                    .await;
-                tracing::info!(?body, ?res, "post");
+            if let HttpResponseMessageType::PRStartNotif = http_response.message_type {
+                if !app.settings.roaming.send_pr_start_notif {
+                    return;
+                }
             }
+
+            let body = serde_json::to_string(&http_response).unwrap();
+            let res = reqwest::Client::new()
+                .post(app.settings.network.lns_endpoint.clone())
+                .body(body.clone())
+                .send()
+                .await;
+            tracing::info!(?body, ?res, "successful downlink post");
         }
-        UpdateAction::SendUplink(body) => {
+        UpdateAction::DownlinkError(http_response) => {
+            let body = serde_json::to_string(&http_response).unwrap();
+            let res = reqwest::Client::new()
+                .post(app.settings.network.lns_endpoint.clone())
+                .body(body.clone())
+                .send()
+                .await;
+            tracing::info!(?body, ?res, "downlink error post");
+        }
+        UpdateAction::UplinkSend(body) => {
             let res = reqwest::Client::new()
                 .post(app.settings.network.lns_endpoint.clone())
                 .body(body.clone())

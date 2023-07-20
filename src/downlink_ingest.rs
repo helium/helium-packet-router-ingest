@@ -36,8 +36,8 @@ async fn downlink_post(
     tracing::info!(?downlink, "http downlink");
     match downlink::parse_http_payload(downlink, &settings) {
         Ok(resp) => match resp {
-            Some(packet_down) => {
-                sender.downlink(packet_down).await;
+            Some((packet_down, http_response)) => {
+                sender.downlink(packet_down, http_response).await;
                 (StatusCode::ACCEPTED, "Downlink Accepted")
             }
             None => (StatusCode::ACCEPTED, "Answer Accepted"),
