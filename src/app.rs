@@ -228,31 +228,40 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
                 }
             }
 
-            let body = serde_json::to_string(&http_response).unwrap();
-            let res = reqwest::Client::new()
-                .post(app.settings.network.lns_endpoint.clone())
-                .body(body.clone())
-                .send()
-                .await;
-            tracing::info!(?body, ?res, "successful downlink post");
+            let lns_endpoint = app.settings.network.lns_endpoint.clone();
+            tokio::spawn(async move {
+                let body = serde_json::to_string(&http_response).unwrap();
+                let res = reqwest::Client::new()
+                    .post(lns_endpoint)
+                    .body(body.clone())
+                    .send()
+                    .await;
+                tracing::info!(?body, ?res, "successful downlink post")
+            });
         }
         UpdateAction::DownlinkError(http_response) => {
-            let body = serde_json::to_string(&http_response).unwrap();
-            let res = reqwest::Client::new()
-                .post(app.settings.network.lns_endpoint.clone())
-                .body(body.clone())
-                .send()
-                .await;
-            tracing::info!(?body, ?res, "downlink error post");
+            let lns_endpoint = app.settings.network.lns_endpoint.clone();
+            tokio::spawn(async move {
+                let body = serde_json::to_string(&http_response).unwrap();
+                let res = reqwest::Client::new()
+                    .post(lns_endpoint)
+                    .body(body.clone())
+                    .send()
+                    .await;
+                tracing::info!(?body, ?res, "downlink error post");
+            });
         }
         UpdateAction::UplinkSend(pr_start_req) => {
-            let body = serde_json::to_string(&pr_start_req).unwrap();
-            let res = reqwest::Client::new()
-                .post(app.settings.network.lns_endpoint.clone())
-                .body(body.clone())
-                .send()
-                .await;
-            tracing::info!(?body, ?res, "post");
+            let lns_endpoint = app.settings.network.lns_endpoint.clone();
+            tokio::spawn(async move {
+                let body = serde_json::to_string(&pr_start_req).unwrap();
+                let res = reqwest::Client::new()
+                    .post(lns_endpoint)
+                    .body(body.clone())
+                    .send()
+                    .await;
+                tracing::info!(?body, ?res, "post");
+            });
         }
     }
 }
