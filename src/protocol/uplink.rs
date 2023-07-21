@@ -1,11 +1,13 @@
 use crate::region;
-use crate::ul_token::{make_data_token, make_join_token};
 use crate::{settings::RoamingSettings, Result};
 use helium_crypto::PublicKeyBinary;
 use helium_proto::services::router::PacketRouterPacketUpV1;
 use helium_proto::Region;
 use lorawan::parser::EUI64;
 use lorawan::parser::{DataHeader, PhyPayload};
+
+use super::ul_token::{make_data_token, make_join_token};
+use super::{GWInfo, PRStartReq, ULMetaData};
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct PacketHash(pub String);
@@ -48,18 +50,18 @@ pub trait PacketUpTrait {
 }
 
 /// Uplinks
-pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Result<String> {
+pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Result<PRStartReq> {
     let packet = packets.first().expect("at least one packet");
 
-    let (routing_key, routing_value, token) = match packet.routing_info() {
+    let (devaddr, dev_eui, token) = match packet.routing_info() {
         RoutingInfo::Eui { dev, .. } => (
-            "DevEUI",
-            dev,
+            None,
+            Some(dev),
             make_join_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
         ),
         RoutingInfo::DevAddr(devaddr) => (
-            "DevAddr",
-            devaddr,
+            Some(devaddr),
+            None,
             make_data_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
         ),
         RoutingInfo::Unknown => todo!("should never get here"),
@@ -67,36 +69,35 @@ pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Resu
 
     let mut gw_info = vec![];
     for packet in packets.iter() {
-        gw_info.push(serde_json::json!({
-            "ID": packet.gateway_mac_str(),
-            "RFRegion": packet.region(),
-            "RSSI": packet.rssi(),
-            "SNR": packet.snr(),
-            "DLAllowed": true
-        }));
+        gw_info.push(GWInfo {
+            id: packet.gateway_mac_str(),
+            region: packet.region(),
+            rssi: packet.rssi(),
+            snr: packet.snr(),
+            dl_allowed: true,
+        });
     }
 
-    Ok(serde_json::to_string(&serde_json::json!({
-        "ProtocolVersion" : "1.1",
-        "MessageType": "PRStartReq",
-        "SenderNSID": config.sender_nsid,
-        "ReceiverNSID": config.receiver_nsid,
-        "DedupWindowSize": config.dedup_window.to_string(),
-        "SenderID": config.helium_net_id,
-        "ReceiverID": config.target_net_id,
-        "PHYPayload": packet.json_payload(),
-        "ULMetaData": {
-            routing_key: routing_value,
-            "DataRate": packet.datarate_index(),
-            "ULFreq": packet.frequency_mhz(),
-            "RecvTime": packet.recv_time(),
-            "RFRegion": packet.region(),
-            "FNSULToken": token,
-            "GWCnt": packets.len(),
-            "GWInfo": gw_info
-        }
-    }))
-    .expect("pr_start_req json"))
+    Ok(PRStartReq {
+        protocol_version: "1.1".to_string(),
+        sender_nsid: config.sender_nsid.to_owned(),
+        receiver_nsid: config.receiver_nsid.to_owned(),
+        dedup_window_size: config.dedup_window.to_string(),
+        sender_id: config.helium_net_id.to_owned(),
+        receiver_id: config.target_net_id.to_owned(),
+        phy_payload: packet.json_payload(),
+        ul_meta_data: ULMetaData {
+            devaddr,
+            dev_eui,
+            data_rate: packet.datarate_index(),
+            ul_freq: packet.frequency_mhz(),
+            recv_time: packet.recv_time(),
+            rf_region: packet.region(),
+            fns_ul_token: token,
+            gw_cnt: gw_info.len(),
+            gw_info,
+        },
+    })
 }
 
 pub fn hz_to_mhz(hz: u32) -> f64 {
@@ -214,8 +215,9 @@ impl From<&str> for PacketHash {
 
 #[cfg(test)]
 mod test {
-    use crate::uplink::RoutingInfo;
     use lorawan::parser::PhyPayload;
+
+    use crate::protocol::uplink::RoutingInfo;
 
     #[test]
     fn eui_parse() {

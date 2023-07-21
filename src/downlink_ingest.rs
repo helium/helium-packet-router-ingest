@@ -1,4 +1,4 @@
-use crate::{app::MsgSender, downlink, settings::RoamingSettings};
+use crate::{app::MsgSender, protocol::downlink, settings::RoamingSettings};
 use axum::{
     extract,
     response::IntoResponse,
@@ -36,8 +36,8 @@ async fn downlink_post(
     tracing::info!(?downlink, "http downlink");
     match downlink::parse_http_payload(downlink, &settings) {
         Ok(resp) => match resp {
-            Some((packet_down, http_response)) => {
-                sender.downlink(packet_down, http_response).await;
+            Some(packet_down) => {
+                sender.downlink(packet_down).await;
                 (StatusCode::ACCEPTED, "Downlink Accepted")
             }
             None => (StatusCode::ACCEPTED, "Answer Accepted"),

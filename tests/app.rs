@@ -2,10 +2,13 @@ use duration_string::DurationString;
 use helium_proto::{services::router::PacketRouterPacketUpV1, Region};
 use hpr_http_rs::{
     app::{self, MsgSender, UpdateAction},
-    downlink::{parse_http_payload, HttpResponseResult},
+    protocol::{
+        downlink::parse_http_payload,
+        ul_token::make_join_token,
+        uplink::{PacketUp, PacketUpTrait},
+        HttpResponseResult,
+    },
     settings::{NetworkSettings, RoamingSettings, Settings},
-    ul_token::make_join_token,
-    uplink::{PacketUp, PacketUpTrait},
     uplink_ingest::GatewayTx,
     Result,
 };
@@ -154,10 +157,9 @@ async fn send_downlink_to_known_gateway() -> Result {
 
     let (gw_tx, _gw_rx) = tokio::sync::mpsc::channel(1);
 
-    let (downlink, http_response) =
-        parse_http_payload(join_accept_payload(), &app.settings.roaming)
-            .expect("result parseable")
-            .expect("option contains downlink");
+    let downlink = parse_http_payload(join_accept_payload(), &app.settings.roaming)
+        .expect("result parseable")
+        .expect("option contains downlink");
 
     // Gateway Connect
     tx.gateway_connect(downlink.gateway_b58.clone(), GatewayTx(gw_tx))
@@ -166,7 +168,7 @@ async fn send_downlink_to_known_gateway() -> Result {
     app::handle_single_message(&mut app).await;
     assert_eq!(1, app.gateway_count());
 
-    tx.downlink(downlink, http_response).await;
+    tx.downlink(downlink).await;
     match app::handle_single_message(&mut app).await {
         UpdateAction::DownlinkSend(_gw_chan, packet_down, http_response) => {
             assert_eq!(HttpResponseResult::Success, http_response.result);
@@ -182,14 +184,13 @@ async fn send_downlink_to_known_gateway() -> Result {
 async fn downlink_to_unknown_gateway_responds_error() -> Result {
     let (tx, mut app) = make_app();
 
-    let (downlink, http_response) =
-        parse_http_payload(join_accept_payload(), &app.settings.roaming)
-            .expect("result parseable")
-            .expect("option contains downlink");
+    let downlink = parse_http_payload(join_accept_payload(), &app.settings.roaming)
+        .expect("result parseable")
+        .expect("option contains downlink");
 
     assert_eq!(0, app.gateway_count());
 
-    tx.downlink(downlink, http_response).await;
+    tx.downlink(downlink).await;
     match app::handle_single_message(&mut app).await {
         UpdateAction::DownlinkError(http_response) => {
             assert_eq!(HttpResponseResult::XmitFailed, http_response.result);

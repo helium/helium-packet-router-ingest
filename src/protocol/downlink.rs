@@ -1,41 +1,42 @@
 use crate::{
+    protocol::{PRStartAns, PRStartAnsPlain, XmitDataReq},
     region::downlink_datarate,
     settings::RoamingSettings,
-    ul_token::{self, Token},
-    uplink::GatewayB58,
     Result,
 };
 use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
+
+use super::{
+    uplink::GatewayB58, ClassMode, DLMetaData, HttpResponse, HttpResponseMessageType,
+    HttpResponseResult, ul_token::PacketType,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PacketDown {
     pub downlink: PacketRouterPacketDownV1,
     pub gateway_b58: GatewayB58,
+    pub http_response: HttpResponse,
 }
 
 pub fn parse_http_payload(
     value: serde_json::Value,
     settings: &RoamingSettings,
-) -> Result<Option<(PacketDown, HttpResponse)>> {
+) -> Result<Option<PacketDown>> {
     use serde_json::from_value;
 
     if let Ok(pr_start) = from_value::<PRStartAns>(value.clone()) {
-        return Ok(Some((
-            PacketDown {
-                downlink: pr_start.to_packet_down(),
-                gateway_b58: pr_start.gateway(),
-            },
-            pr_start.http_body(settings),
-        )));
+        return Ok(Some(PacketDown {
+            downlink: pr_start.to_packet_down(),
+            gateway_b58: pr_start.gateway(),
+            http_response: pr_start.http_body(settings),
+        }));
     }
     if let Ok(xmit) = from_value::<XmitDataReq>(value.clone()) {
-        return Ok(Some((
-            PacketDown {
-                downlink: xmit.to_packet_down(),
-                gateway_b58: xmit.gateway(),
-            },
-            xmit.http_body(settings),
-        )));
+        return Ok(Some(PacketDown {
+            downlink: xmit.to_packet_down(),
+            gateway_b58: xmit.gateway(),
+            http_response: xmit.http_body(settings),
+        }));
     }
     if let Ok(plain) = from_value::<PRStartAnsPlain>(value.clone()) {
         tracing::trace!(?plain, "no downlink");
@@ -146,8 +147,8 @@ impl DLMetaData {
 
     fn rx_delay(&self) -> Option<u64> {
         match self.fns_ul_token.packet_type {
-            ul_token::PacketType::Join => Some(5),
-            ul_token::PacketType::Data => self.rx_delay_1,
+            PacketType::Join => Some(5),
+            PacketType::Data => self.rx_delay_1,
         }
     }
 
@@ -208,155 +209,17 @@ fn add_delay(timestamp: u64, add: u64) -> u64 {
     ((timestamp + add) as u32) as u64
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub struct HttpResponse {
-    #[serde(rename = "ProtocolVersion")]
-    pub protocol_version: String,
-    #[serde(rename = "MessageType")]
-    pub message_type: HttpResponseMessageType,
-    #[serde(rename = "SenderID")]
-    pub sender_id: String,
-    #[serde(rename = "ReceiverID")]
-    pub receiver_id: String,
-    #[serde(rename = "TransactionID")]
-    pub transaction_id: u64,
-    #[serde(rename = "SenderNSID")]
-    pub sender_nsid: String,
-    #[serde(rename = "ReceiverNSID")]
-    pub receiver_nsid: String,
-    #[serde(rename = "Result")]
-    pub result: HttpResponseResult,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-pub enum HttpResponseMessageType {
-    PRStartNotif,
-    XmitDataAns,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
-#[serde(tag = "ResultCode")]
-pub enum HttpResponseResult {
-    Success,
-    MICFailed,
-    XmitFailed,
-}
-
-impl HttpResponse {
-    pub fn success(mut self) -> Self {
-        self.result = HttpResponseResult::Success;
-        self
-    }
-
-    pub fn mic_failed(mut self) -> Self {
-        self.result = HttpResponseResult::MICFailed;
-        self
-    }
-
-    pub fn xmit_failed(mut self) -> Self {
-        self.result = HttpResponseResult::XmitFailed;
-        self
-    }
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct XmitDataReq {
-    #[serde(rename = "ProtocolVersion")]
-    pub protocol_version: String,
-    #[serde(rename = "SenderID")]
-    pub sender_id: String,
-    #[serde(rename = "ReceiverID")]
-    pub receiver_id: String,
-    #[serde(rename = "TransactionID")]
-    pub transaction_id: u64,
-    #[serde(rename = "MessageType")]
-    pub message_type: String,
-    #[serde(rename = "PHYPayload")]
-    pub phy_payload: String,
-    #[serde(rename = "DLMetaData")]
-    pub dl_meta_data: DLMetaData,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct PRStartAns {
-    #[serde(rename = "ProtocolVersion")]
-    pub protocol_version: String,
-    #[serde(rename = "SenderID")]
-    pub sender_id: String,
-    #[serde(rename = "ReceiverID")]
-    pub receiver_id: String,
-    #[serde(rename = "TransactionID")]
-    pub transaction_id: u64,
-    #[serde(rename = "MessageType")]
-    pub message_type: String,
-    #[serde(rename = "Result")]
-    pub result: PRStartAnsResult,
-    #[serde(rename = "PHYPayload")]
-    pub phy_payload: String,
-    #[serde(rename = "DLMetaData")]
-    pub dl_meta_data: DLMetaData,
-}
-
-/// This type exists to parse a PRStartAns that contains no downlink,
-/// rather than making DLMetaData optional.
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct PRStartAnsPlain {
-    #[serde(rename = "ProtocolVersion")]
-    pub protocol_version: String,
-    #[serde(rename = "SenderID")]
-    pub sender_id: String,
-    #[serde(rename = "ReceiverID")]
-    pub receiver_id: String,
-    #[serde(rename = "TransactionID")]
-    pub transaction_id: u64,
-    #[serde(rename = "MessageType")]
-    pub message_type: String,
-    #[serde(rename = "Result")]
-    pub result: PRStartAnsResult,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct PRStartAnsResult {
-    #[serde(rename = "ResultCode")]
-    pub result_code: String,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub enum ClassMode {
-    A,
-    C,
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct DLMetaData {
-    #[serde(rename = "DevEUI")]
-    pub dev_eui: String,
-    #[serde(rename = "FNSULToken", with = "hex::serde")]
-    pub fns_ul_token: Token,
-    #[serde(rename = "ClassMode")]
-    pub class_mode: ClassMode,
-
-    // rx windows
-    #[serde(rename = "DLFreq1")]
-    pub dl_freq_1: Option<f64>,
-    #[serde(rename = "DataRate1")]
-    pub data_rate_1: Option<u8>,
-    #[serde(rename = "RXDelay1")]
-    pub rx_delay_1: Option<u64>,
-    #[serde(rename = "DLFreq2")]
-    pub dl_freq_2: Option<f64>,
-    #[serde(rename = "DataRate2")]
-    pub data_rate_2: Option<u8>,
-}
-
 #[cfg(test)]
 mod test {
     use super::PacketDown;
     use crate::{
-        downlink::{PRStartAns, ToPacketDown},
+        protocol::{
+            downlink::ToPacketDown,
+            ul_token::{make_data_token, make_join_token},
+            PRStartAns,
+        },
         region::{downlink_datarate, Region},
         settings::RoamingSettings,
-        ul_token::{make_data_token, make_join_token},
         Result,
     };
     use duration_string::DurationString;
@@ -378,7 +241,6 @@ mod test {
 
     fn parse_http_payload(value: serde_json::Value) -> Result<Option<PacketDown>> {
         super::parse_http_payload(value, &RoamingSettings::default())
-            .map(|parsed| parsed.map(|inner| inner.0))
     }
 
     fn join_accept_payload() -> serde_json::Value {

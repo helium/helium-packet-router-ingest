@@ -2,7 +2,7 @@ use std::{net::SocketAddr, time::Duration};
 
 use crate::{
     app::MsgSender,
-    uplink::{PacketUp, PacketUpTrait},
+    protocol::uplink::{PacketUp, PacketUpTrait},
     Result,
 };
 use helium_proto::services::router::{

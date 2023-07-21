@@ -1,9 +1,11 @@
 use crate::{
     deduplicator::{Deduplicator, HandlePacket},
-    downlink::{HttpResponse, HttpResponseMessageType, PacketDown},
+    protocol::{
+        downlink::PacketDown,
+        uplink::{self, GatewayB58, PacketHash, PacketUp},
+        HttpResponse, HttpResponseMessageType, PRStartReq,
+    },
     settings::Settings,
-    uplink,
-    uplink::{GatewayB58, PacketHash, PacketUp},
     uplink_ingest::GatewayTx,
 };
 use std::collections::HashMap;
@@ -40,7 +42,7 @@ pub enum Msg {
     /// Cleanup timer has elapsed.
     UplinkCleanup(PacketHash),
     /// Downlink received for gateway from HTTP handler.
-    Downlink(PacketDown, HttpResponse),
+    Downlink(PacketDown),
     /// Gateway has Connected.
     GatewayConnect(GatewayB58, GatewayTx),
     /// Gateway has Disconnected.
@@ -90,10 +92,10 @@ impl MsgSender {
             .expect("gateway_disconnect");
     }
 
-    pub async fn downlink(&self, downlink: PacketDown, http_response: HttpResponse) {
+    pub async fn downlink(&self, downlink: PacketDown) {
         metrics::increment_counter!("downlink");
         self.0
-            .send(Msg::Downlink(downlink, http_response))
+            .send(Msg::Downlink(downlink))
             .await
             .expect("downlink");
     }
@@ -106,7 +108,7 @@ pub enum UpdateAction {
     StartTimerForNewPacket(PacketHash),
     DownlinkSend(GatewayTx, PacketDown, HttpResponse),
     DownlinkError(HttpResponse),
-    UplinkSend(String),
+    UplinkSend(PRStartReq),
 }
 
 impl App {
@@ -179,22 +181,19 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
             app.deduplicator.remove_packets(&packet_hash);
             UpdateAction::Noop
         }
-        Msg::Downlink(packet_down, http_response) => {
-            match app.gateway_map.get(&packet_down.gateway_b58) {
-                None => {
-                    tracing::warn!(
-                        gw = packet_down.gateway_b58,
-                        "join accept for unknown gateway"
-                    );
-                    UpdateAction::DownlinkError(http_response.xmit_failed())
-                }
-                Some(gateway) => UpdateAction::DownlinkSend(
-                    gateway.clone(),
-                    packet_down,
-                    http_response.success(),
-                ),
+        Msg::Downlink(packet_down) => match app.gateway_map.get(&packet_down.gateway_b58) {
+            None => {
+                tracing::warn!(
+                    gw = packet_down.gateway_b58,
+                    "join accept for unknown gateway"
+                );
+                UpdateAction::DownlinkError(packet_down.http_response.xmit_failed())
             }
-        }
+            Some(gateway) => {
+                let http_response = packet_down.http_response.clone().success();
+                UpdateAction::DownlinkSend(gateway.clone(), packet_down, http_response.success())
+            }
+        },
         Msg::GatewayConnect(gw, sender) => {
             let _prev_val = app.gateway_map.insert(gw, sender);
             tracing::info!(size = app.gateway_map.len(), "gateway connect");
@@ -251,7 +250,8 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
                 .await;
             tracing::info!(?body, ?res, "downlink error post");
         }
-        UpdateAction::UplinkSend(body) => {
+        UpdateAction::UplinkSend(pr_start_req) => {
+            let body = serde_json::to_string(&pr_start_req).unwrap();
             let res = reqwest::Client::new()
                 .post(app.settings.network.lns_endpoint.clone())
                 .body(body.clone())
