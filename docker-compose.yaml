@@ -1,0 +1,10 @@
+version: '3'
+services:
+  roaming:
+    build: .
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+      - "9002:9002"
+    volumes:
+      - ./settings.toml:/app/settings.toml
