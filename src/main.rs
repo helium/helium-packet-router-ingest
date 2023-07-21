@@ -7,6 +7,7 @@ use hpr_http_rs::{
 };
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{net::SocketAddr, path::PathBuf};
+use tokio::spawn;
 
 #[derive(Debug, clap::Parser)]
 struct Cli {
@@ -55,9 +56,13 @@ pub async fn run(settings: Settings) {
     let (sender, receiver) = MsgSender::new();
 
     let _ = tokio::try_join!(
-        app::start(sender.clone(), receiver, settings.clone()),
-        uplink_ingest::start(sender.clone(), grpc_listen_addr),
-        downlink_ingest::start(sender.clone(), http_listen_addr, settings.roaming)
+        spawn(app::start(sender.clone(), receiver, settings.clone())),
+        spawn(uplink_ingest::start(sender.clone(), grpc_listen_addr)),
+        spawn(downlink_ingest::start(
+            sender.clone(),
+            http_listen_addr,
+            settings.roaming
+        ))
     );
 }
 

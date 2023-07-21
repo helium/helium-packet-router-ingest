@@ -7,6 +7,7 @@ use crate::{
     },
     settings::Settings,
     uplink_ingest::GatewayTx,
+    Result,
 };
 use std::collections::HashMap;
 use tokio::sync::mpsc::{Receiver, Sender};
@@ -136,18 +137,12 @@ impl App {
     }
 }
 
-pub fn start(
-    message_tx: MsgSender,
-    message_rx: Receiver<Msg>,
-    settings: Settings,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut app = App::new(message_tx, message_rx, settings);
-        loop {
-            let action = handle_single_message(&mut app).await;
-            handle_update_action(&app, action).await;
-        }
-    })
+pub async fn start(message_tx: MsgSender, message_rx: Receiver<Msg>, settings: Settings) -> Result {
+    let mut app = App::new(message_tx, message_rx, settings);
+    loop {
+        let action = handle_single_message(&mut app).await;
+        handle_update_action(&app, action).await;
+    }
 }
 
 pub async fn handle_single_message(app: &mut App) -> UpdateAction {

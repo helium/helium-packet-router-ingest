@@ -1,4 +1,4 @@
-use crate::{app::MsgSender, protocol::downlink, settings::RoamingSettings};
+use crate::{app::MsgSender, protocol::downlink, settings::RoamingSettings, Result};
 use axum::{
     extract,
     response::IntoResponse,
@@ -10,23 +10,17 @@ use std::net::SocketAddr;
 use tracing::instrument;
 
 #[instrument]
-pub fn start(
-    sender: MsgSender,
-    addr: SocketAddr,
-    settings: RoamingSettings,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let app = Router::new()
-            .route("/api/downlink", post(downlink_post))
-            .route("/health", get(|| async { "ok" }))
-            .layer(Extension((sender, settings)));
+pub async fn start(sender: MsgSender, addr: SocketAddr, settings: RoamingSettings) -> Result {
+    let app = Router::new()
+        .route("/api/downlink", post(downlink_post))
+        .route("/health", get(|| async { "ok" }))
+        .layer(Extension((sender, settings)));
 
-        tracing::debug!(?addr, "setup");
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service())
-            .await
-            .expect("serve http");
-    })
+    tracing::debug!(?addr, "setup");
+    axum::Server::bind(&addr)
+        .serve(app.into_make_service())
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 async fn downlink_post(

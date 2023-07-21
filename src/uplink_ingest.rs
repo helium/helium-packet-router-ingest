@@ -7,7 +7,7 @@ use crate::{
 };
 use helium_proto::services::router::{
     envelope_down_v1, envelope_up_v1, packet_server::Packet, packet_server::PacketServer,
-    EnvelopeDownV1, EnvelopeUpV1, PacketRouterPacketDownV1, PacketRouterPacketUpV1,
+    EnvelopeDownV1, EnvelopeUpV1, PacketRouterPacketDownV1,
 };
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
@@ -15,14 +15,12 @@ use tonic::{Request, Response, Status, Streaming};
 use tracing::instrument;
 
 #[instrument]
-pub fn start(sender: MsgSender, addr: SocketAddr) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(PacketServer::new(Gateways::new(sender)))
-            .serve(addr)
-            .await
-            .unwrap();
-    })
+pub async fn start(sender: MsgSender, addr: SocketAddr) -> Result {
+    tonic::transport::Server::builder()
+        .add_service(PacketServer::new(Gateways::new(sender)))
+        .serve(addr)
+        .await
+        .map_err(anyhow::Error::from)
 }
 
 #[derive(Debug)]
