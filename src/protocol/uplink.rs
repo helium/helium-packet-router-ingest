@@ -27,6 +27,17 @@ impl PacketUp {
     }
 }
 
+impl From<PacketRouterPacketUpV1> for PacketUp {
+    fn from(value: PacketRouterPacketUpV1) -> Self {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        Self::new(value, now)
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum RoutingInfo {
     Eui { app: Eui, dev: Eui },
