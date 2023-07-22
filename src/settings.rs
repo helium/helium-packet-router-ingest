@@ -42,6 +42,8 @@ pub struct RoamingSettings {
     /// Chirpstack does nothing with the notif message and returns an 400.
     #[arg(long, default_value = "false")]
     pub send_pr_start_notif: bool,
+    #[arg(long)]
+    pub authorization_header: Option<String>,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]

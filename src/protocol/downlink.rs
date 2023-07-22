@@ -7,8 +7,8 @@ use crate::{
 use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
 
 use super::{
-    uplink::GatewayB58, ClassMode, DLMetaData, HttpResponse, HttpResponseMessageType,
-    HttpResponseResult, ul_token::PacketType,
+    ul_token::PacketType, uplink::GatewayB58, ClassMode, DLMetaData, HttpResponse,
+    HttpResponseMessageType, HttpResponseResult,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -235,6 +235,7 @@ mod test {
                 receiver_nsid: Default::default(),
                 dedup_window: DurationString::new(Duration::from_millis(1250)),
                 send_pr_start_notif: Default::default(),
+                authorization_header: Default::default(),
             }
         }
     }

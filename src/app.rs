@@ -9,6 +9,10 @@ use crate::{
     uplink_ingest::GatewayTx,
     Result,
 };
+use axum::http::HeaderMap;
+use reqwest::header;
+use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
+use reqwest_tracing::TracingMiddleware;
 use std::collections::HashMap;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -18,6 +22,7 @@ pub struct App {
     pub settings: Settings,
     message_tx: MsgSender,
     message_rx: Receiver<Msg>,
+    client: ClientWithMiddleware,
 }
 
 #[derive(Debug, Clone)]
@@ -114,12 +119,29 @@ pub enum UpdateAction {
 
 impl App {
     pub fn new(message_tx: MsgSender, message_rx: Receiver<Msg>, settings: Settings) -> Self {
+        let mut headers_map = HeaderMap::new();
+        if let Some(auth_header) = settings.roaming.authorization_header.clone() {
+            headers_map.append(
+                header::AUTHORIZATION,
+                header::HeaderValue::from_str(&auth_header).unwrap(),
+            );
+        }
+        let client = ClientBuilder::new(
+            reqwest::Client::builder()
+                .default_headers(headers_map.clone())
+                .build()
+                .unwrap(),
+        )
+        .with(TracingMiddleware::default())
+        .build();
+
         Self {
             deduplicator: Deduplicator::new(),
             gateway_map: HashMap::new(),
             message_tx,
             message_rx,
             settings,
+            client,
         }
     }
     pub fn gateway_count(&self) -> usize {
@@ -229,37 +251,28 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
             }
 
             let lns_endpoint = app.settings.network.lns_endpoint.clone();
+            let client = app.client.clone();
             tokio::spawn(async move {
                 let body = serde_json::to_string(&http_response).unwrap();
-                let res = reqwest::Client::new()
-                    .post(lns_endpoint)
-                    .body(body.clone())
-                    .send()
-                    .await;
+                let res = client.post(lns_endpoint).body(body.clone()).send().await;
                 tracing::info!(?body, ?res, "successful downlink post")
             });
         }
         UpdateAction::DownlinkError(http_response) => {
             let lns_endpoint = app.settings.network.lns_endpoint.clone();
+            let client = app.client.clone();
             tokio::spawn(async move {
                 let body = serde_json::to_string(&http_response).unwrap();
-                let res = reqwest::Client::new()
-                    .post(lns_endpoint)
-                    .body(body.clone())
-                    .send()
-                    .await;
+                let res = client.post(lns_endpoint).body(body.clone()).send().await;
                 tracing::info!(?body, ?res, "downlink error post");
             });
         }
         UpdateAction::UplinkSend(pr_start_req) => {
             let lns_endpoint = app.settings.network.lns_endpoint.clone();
+            let client = app.client.clone();
             tokio::spawn(async move {
                 let body = serde_json::to_string(&pr_start_req).unwrap();
-                let res = reqwest::Client::new()
-                    .post(lns_endpoint)
-                    .body(body.clone())
-                    .send()
-                    .await;
+                let res = client.post(lns_endpoint).body(body.clone()).send().await;
                 tracing::info!(?body, ?res, "post");
             });
         }
