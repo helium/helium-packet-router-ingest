@@ -22,6 +22,11 @@ pub struct Settings {
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]
 pub struct RoamingSettings {
+    /// Which Protocol Version is this service interacting with.
+    /// Notable differences between 1.0 and 1.1 is the addition of:
+    /// - PRStartNotif
+    /// - SenderNSID
+    /// - ReceiverNSID
     #[arg(long, value_enum, default_value = "1.1")]
     #[serde(with = "protocol_version_serde")]
     pub protocol_version: ProtocolVersion,
@@ -41,10 +46,8 @@ pub struct RoamingSettings {
     /// How long were the packets held in duration time (1250ms, 1.2s)
     #[arg(long, default_value = "1250ms")]
     pub dedup_window: DurationString,
-    /// Send PRStartNotif message after sending Downlink to gateway.
-    /// Chirpstack does nothing with the notif message and returns an 400.
-    #[arg(long, default_value = "false")]
-    pub send_pr_start_notif: bool,
+    /// When present, this string is inserted into the "AUTHORIZATION"
+    /// header of all http requests.
     #[arg(long)]
     pub authorization_header: Option<String>,
 }

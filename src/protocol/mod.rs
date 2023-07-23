@@ -1,5 +1,5 @@
 use self::ul_token::Token;
-use crate::region;
+use crate::{region, settings::ProtocolVersion};
 
 pub mod downlink;
 pub mod ul_token;
@@ -110,6 +110,15 @@ impl HttpResponse {
     pub fn xmit_failed(mut self) -> Self {
         self.result = HttpResponseResult::XmitFailed;
         self
+    }
+
+    pub fn should_send_for_protocol(&self, protocol_version: &ProtocolVersion) -> bool {
+        match (&self.message_type, protocol_version) {
+            (HttpResponseMessageType::PRStartNotif, ProtocolVersion::V1_0) => false,
+            (HttpResponseMessageType::PRStartNotif, ProtocolVersion::V1_1) => true,
+            (HttpResponseMessageType::XmitDataAns, ProtocolVersion::V1_0) => true,
+            (HttpResponseMessageType::XmitDataAns, ProtocolVersion::V1_1) => true,
+        }
     }
 }
 

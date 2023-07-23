@@ -240,7 +240,6 @@ fn default_settings() -> Settings {
             sender_nsid: "sender-nsid".to_string(),
             receiver_nsid: "receiver-nsid".to_string(),
             dedup_window: DurationString::from_string("250ms".to_string()).unwrap(),
-            send_pr_start_notif: false,
             authorization_header: Some("Auth header".to_string()),
         },
         network: NetworkSettings {

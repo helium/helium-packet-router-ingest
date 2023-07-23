@@ -235,7 +235,6 @@ mod test {
                 sender_nsid: Default::default(),
                 receiver_nsid: Default::default(),
                 dedup_window: DurationString::new(Duration::from_millis(1250)),
-                send_pr_start_notif: Default::default(),
                 authorization_header: Default::default(),
             }
         }

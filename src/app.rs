@@ -3,7 +3,7 @@ use crate::{
     protocol::{
         downlink::PacketDown,
         uplink::{self, GatewayB58, PacketHash, PacketUp},
-        HttpResponse, HttpResponseMessageType, PRStartReq,
+        HttpResponse, PRStartReq,
     },
     settings::Settings,
     uplink_ingest::GatewayTx,
@@ -244,19 +244,15 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
             gw_tx.send_downlink(packet_down.downlink).await;
             tracing::info!(gw = packet_down.gateway_b58, "downlink sent");
 
-            if let HttpResponseMessageType::PRStartNotif = http_response.message_type {
-                if !app.settings.roaming.send_pr_start_notif {
-                    return;
-                }
+            if http_response.should_send_for_protocol(&app.settings.roaming.protocol_version) {
+                let lns_endpoint = app.settings.network.lns_endpoint.clone();
+                let client = app.client.clone();
+                tokio::spawn(async move {
+                    let body = serde_json::to_string(&http_response).unwrap();
+                    let res = client.post(lns_endpoint).body(body.clone()).send().await;
+                    tracing::info!(?body, ?res, "successful downlink post")
+                });
             }
-
-            let lns_endpoint = app.settings.network.lns_endpoint.clone();
-            let client = app.client.clone();
-            tokio::spawn(async move {
-                let body = serde_json::to_string(&http_response).unwrap();
-                let res = client.post(lns_endpoint).body(body.clone()).send().await;
-                tracing::info!(?body, ?res, "successful downlink post")
-            });
         }
         UpdateAction::DownlinkError(http_response) => {
             let lns_endpoint = app.settings.network.lns_endpoint.clone();
