@@ -229,6 +229,7 @@ mod test {
     impl Default for RoamingSettings {
         fn default() -> Self {
             Self {
+                protocol_version: Default::default(),
                 helium_net_id: Default::default(),
                 target_net_id: Default::default(),
                 sender_nsid: Default::default(),

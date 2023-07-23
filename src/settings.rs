@@ -1,6 +1,6 @@
 use config::{Config, File};
 use duration_string::DurationString;
-use std::{net::SocketAddr, path::PathBuf};
+use std::{net::SocketAddr, path::PathBuf, str::FromStr};
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]
 pub struct Settings {
@@ -22,6 +22,9 @@ pub struct Settings {
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]
 pub struct RoamingSettings {
+    #[arg(long, value_enum, default_value = "1.1")]
+    #[serde(with = "protocol_version_serde")]
+    pub protocol_version: ProtocolVersion,
     /// Helium forwarding NetID, for LNSs to identify which network to back through for downlinking.
     /// (default: C00053)
     #[arg(long, default_value = "C00053")]
@@ -44,6 +47,18 @@ pub struct RoamingSettings {
     pub send_pr_start_notif: bool,
     #[arg(long)]
     pub authorization_header: Option<String>,
+}
+
+#[derive(Debug, Clone, clap::ValueEnum, serde::Deserialize, serde::Serialize)]
+pub enum ProtocolVersion {
+    V1_0,
+    V1_1,
+}
+
+impl Default for ProtocolVersion {
+    fn default() -> Self {
+        Self::V1_1
+    }
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]
@@ -72,4 +87,40 @@ pub fn from_path(path: Option<PathBuf>) -> Settings {
         .build()
         .and_then(|config| config.try_deserialize())
         .expect("valid config file")
+}
+
+impl FromStr for ProtocolVersion {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "1.0" => Ok(ProtocolVersion::V1_0),
+            "1.1" => Ok(ProtocolVersion::V1_1),
+            _ => Err(format!("Unknown ProtocolVersion: {}", s)),
+        }
+    }
+}
+
+impl ToString for ProtocolVersion {
+    fn to_string(&self) -> String {
+        match self {
+            ProtocolVersion::V1_0 => "1.0".to_string(),
+            ProtocolVersion::V1_1 => "1.1".to_string(),
+        }
+    }
+}
+
+mod protocol_version_serde {
+    use std::str::FromStr;
+
+    use super::ProtocolVersion;
+    use serde::{Deserialize, Deserializer};
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<ProtocolVersion, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let version_str = String::deserialize(deserializer)?;
+        ProtocolVersion::from_str(&version_str).map_err(serde::de::Error::custom)
+    }
 }

@@ -8,7 +8,7 @@ use hpr_http_rs::{
         uplink::{PacketUp, PacketUpTrait},
         HttpResponseResult,
     },
-    settings::{NetworkSettings, RoamingSettings, Settings},
+    settings::{NetworkSettings, ProtocolVersion, RoamingSettings, Settings},
     uplink_ingest::GatewayTx,
     Result,
 };
@@ -234,6 +234,7 @@ fn make_app() -> (MsgSender, app::App) {
 fn default_settings() -> Settings {
     Settings {
         roaming: RoamingSettings {
+            protocol_version: ProtocolVersion::default(),
             helium_net_id: "C00053".to_string(),
             target_net_id: "000024".to_string(),
             sender_nsid: "sender-nsid".to_string(),

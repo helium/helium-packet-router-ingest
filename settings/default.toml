@@ -8,6 +8,9 @@ cleanup_window = "30s"
 metrics_listen = "0.0.0.0:9002"
 
 [roaming]
+## Roaming Protocol Version
+protocol_version = "1.1"
+
 ## Main Helium NetID.
 helium_net_id = "C00053"
 

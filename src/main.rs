@@ -37,6 +37,7 @@ async fn main() {
 }
 
 pub async fn run(settings: Settings) {
+    let protocol_version = &settings.roaming.protocol_version;
     let metrics_listen_addr = settings.metrics_listen;
     let http_listen_addr = settings.network.downlink_listen;
     let grpc_listen_addr = settings.network.uplink_listen;
@@ -44,6 +45,7 @@ pub async fn run(settings: Settings) {
     let dedup_window = settings.roaming.dedup_window;
 
     tracing::info!("=====================================");
+    tracing::info!("protocol        :: {protocol_version:?}");
     tracing::info!("metrics listen  :: {metrics_listen_addr}");
     tracing::info!("uplink listen   :: {grpc_listen_addr}");
     tracing::info!("downlink listen :: {http_listen_addr}");
