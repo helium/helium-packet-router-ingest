@@ -1,12 +1,12 @@
-use crate::{
+use super::{
     deduplicator::{Deduplicator, HandlePacket},
-    protocol::{
-        downlink::PacketDown,
-        uplink::{self, GatewayB58, PacketHash, PacketUp},
-        HttpResponse, PRStartReq,
-    },
-    settings::Settings,
-    uplink_ingest::GatewayTx,
+    settings::HttpSettings,
+    Msg, MsgReceiver, MsgSender,
+};
+use crate::{
+    http_roaming::{downlink::PacketDown, make_pr_start_req, HttpResponse, PRStartReq},
+    uplink::ingest::GatewayTx,
+    uplink::packet::{GatewayB58, PacketHash},
     Result,
 };
 use axum::http::HeaderMap;
@@ -14,97 +14,14 @@ use reqwest::header;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_tracing::TracingMiddleware;
 use std::collections::HashMap;
-use tokio::sync::mpsc::{Receiver, Sender};
 
 pub struct App {
     deduplicator: Deduplicator,
     gateway_map: HashMap<GatewayB58, GatewayTx>,
-    pub settings: Settings,
+    pub settings: HttpSettings,
     message_tx: MsgSender,
-    message_rx: Receiver<Msg>,
+    message_rx: MsgReceiver,
     client: ClientWithMiddleware,
-}
-
-#[derive(Debug, Clone)]
-pub struct MsgSender(pub Sender<Msg>);
-pub type MsgReceiver = Receiver<Msg>;
-
-/// This message contains the entirety of the lifecycle of routing packets from hpr through http.
-///
-/// At a gateway's first packet, we register a downlink handler for a gateway.
-/// Once a gateway is known packets will be ingested normally.
-///
-/// Packets are sent to the deduplicator, which will group packets by hash.
-/// A `dedup_window` timer is started, after which the packets are forwarded to the roamer.
-/// After, a `cleanup_window` timer is started to prevent immediate double delivery of late packets.
-///   Setting this too short may result in double delivery of packet groups.
-///   Too long may lead to memory issues.
-#[derive(Debug)]
-pub enum Msg {
-    /// Incoming Packet from a Gateway.
-    UplinkReceive(PacketUp),
-    /// Deduplication timer has elapsed.
-    UplinkSend(PacketHash),
-    /// Cleanup timer has elapsed.
-    UplinkCleanup(PacketHash),
-    /// Downlink received for gateway from HTTP handler.
-    Downlink(PacketDown),
-    /// Gateway has Connected.
-    GatewayConnect(GatewayB58, GatewayTx),
-    /// Gateway has Disconnected.
-    GatewayDisconnect(GatewayB58),
-}
-
-impl MsgSender {
-    pub fn new() -> (MsgSender, MsgReceiver) {
-        let (tx, rx) = tokio::sync::mpsc::channel(512);
-        (MsgSender(tx), rx)
-    }
-
-    pub async fn uplink_receive(&self, packet: PacketUp) {
-        metrics::increment_counter!("uplink_receive");
-        self.0
-            .send(Msg::UplinkReceive(packet))
-            .await
-            .expect("uplink");
-    }
-
-    pub async fn uplink_send(&self, key: PacketHash) {
-        metrics::increment_counter!("uplink_send");
-        self.0.send(Msg::UplinkSend(key)).await.expect("dedup done");
-    }
-
-    pub async fn uplink_cleanup(&self, key: PacketHash) {
-        metrics::increment_counter!("uplink cleanup");
-        self.0
-            .send(Msg::UplinkCleanup(key))
-            .await
-            .expect("dedup_cleanup");
-    }
-
-    pub async fn gateway_connect(&self, gateway_b58: GatewayB58, downlink_sender: GatewayTx) {
-        metrics::increment_gauge!("connected_gateways", 1.0);
-        self.0
-            .send(Msg::GatewayConnect(gateway_b58, downlink_sender))
-            .await
-            .expect("gateway_connect");
-    }
-
-    pub async fn gateway_disconnect(&self, gateway: GatewayB58) {
-        metrics::decrement_gauge!("connected_gateways", 1.0);
-        self.0
-            .send(Msg::GatewayDisconnect(gateway))
-            .await
-            .expect("gateway_disconnect");
-    }
-
-    pub async fn downlink(&self, downlink: PacketDown) {
-        metrics::increment_counter!("downlink");
-        self.0
-            .send(Msg::Downlink(downlink))
-            .await
-            .expect("downlink");
-    }
 }
 
 /// After updating app state, these are the side effects that can happen.
@@ -118,7 +35,7 @@ pub enum UpdateAction {
 }
 
 impl App {
-    pub fn new(message_tx: MsgSender, message_rx: Receiver<Msg>, settings: Settings) -> Self {
+    pub fn new(message_tx: MsgSender, message_rx: MsgReceiver, settings: HttpSettings) -> Self {
         let mut headers_map = HeaderMap::new();
         if let Some(auth_header) = settings.roaming.authorization_header.clone() {
             headers_map.append(
@@ -159,7 +76,11 @@ impl App {
     }
 }
 
-pub async fn start(message_tx: MsgSender, message_rx: Receiver<Msg>, settings: Settings) -> Result {
+pub async fn start(
+    message_tx: MsgSender,
+    message_rx: MsgReceiver,
+    settings: HttpSettings,
+) -> Result {
     let mut app = App::new(message_tx, message_rx, settings);
     loop {
         let action = handle_single_message(&mut app).await;
@@ -185,7 +106,7 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
             }
             Some(packets) => {
                 tracing::info!(num_packets = packets.len(), "deduplication done");
-                match uplink::make_pr_start_req(packets, &app.settings.roaming) {
+                match make_pr_start_req(packets, &app.settings.roaming) {
                     Ok(body) => UpdateAction::UplinkSend(body),
                     Err(err) => {
                         tracing::warn!(?packet_hash, ?err, "failed to make pr_start_req");

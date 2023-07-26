@@ -1,9 +1,8 @@
 use clap::Parser;
 use hpr_http_rs::{
-    app::{self, MsgSender},
-    downlink_ingest,
-    settings::{self, Settings},
-    uplink_ingest,
+    gwmp::{self, settings::GwmpSettings},
+    http_roaming::{self, settings::HttpSettings},
+    settings, uplink,
 };
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{net::SocketAddr, path::PathBuf};
@@ -18,7 +17,9 @@ struct Cli {
 #[derive(Debug, Clone, clap::Subcommand)]
 enum Commands {
     /// Run the program with a toml settings file.
-    Serve { path: Option<PathBuf> },
+    ServeHttp { path: Option<PathBuf> },
+    /// Run the program to forward traffic over UDP
+    ServeGwmp { path: Option<PathBuf> },
 }
 
 #[tokio::main]
@@ -29,14 +30,18 @@ async fn main() {
     tracing::debug!(?cli, "opts");
 
     match cli.command {
-        Commands::Serve { path } => {
-            let settings = settings::from_path(path);
-            run(settings).await
+        Commands::ServeHttp { path } => {
+            let settings = settings::http_from_path(path);
+            run_http(settings).await
+        }
+        Commands::ServeGwmp { path } => {
+            let settings = settings::gwmp_from_path(path);
+            run_gwmp(settings).await
         }
     }
 }
 
-pub async fn run(settings: Settings) {
+pub async fn run_http(settings: HttpSettings) {
     let protocol_version = &settings.roaming.protocol_version;
     let metrics_listen_addr = settings.metrics_listen;
     let http_listen_addr = settings.network.downlink_listen;
@@ -55,16 +60,39 @@ pub async fn run(settings: Settings) {
 
     start_metrics(metrics_listen_addr);
 
-    let (sender, receiver) = MsgSender::new();
+    let (sender, receiver) = http_roaming::MsgSender::new();
 
     let _ = tokio::try_join!(
-        spawn(app::start(sender.clone(), receiver, settings.clone())),
-        spawn(uplink_ingest::start(sender.clone(), grpc_listen_addr)),
-        spawn(downlink_ingest::start(
+        spawn(http_roaming::app::start(
+            sender.clone(),
+            receiver,
+            settings.clone()
+        )),
+        spawn(uplink::ingest::start(sender.clone(), grpc_listen_addr)),
+        spawn(http_roaming::downlink_ingest::start(
             sender.clone(),
             http_listen_addr,
             settings.roaming
         ))
+    );
+}
+
+pub async fn run_gwmp(settings: GwmpSettings) {
+    let metrics_listen_addr = settings.metrics_listen;
+    let grpc_listen_addr = settings.uplink_listen;
+
+    tracing::info!("=====================================");
+    tracing::info!("metrics listen  :: {metrics_listen_addr}");
+    tracing::info!("uplink listen   :: {grpc_listen_addr}");
+    tracing::info!("=====================================");
+
+    start_metrics(metrics_listen_addr);
+
+    let (sender, receiver) = gwmp::MsgSender::new();
+
+    let _ = tokio::try_join!(
+        spawn(gwmp::app::start(sender.clone(), receiver, settings.clone())),
+        spawn(uplink::ingest::start(sender.clone(), grpc_listen_addr)),
     );
 }
 

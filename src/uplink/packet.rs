@@ -1,13 +1,9 @@
 use crate::region;
-use crate::{settings::RoamingSettings, Result};
 use helium_crypto::PublicKeyBinary;
 use helium_proto::services::router::PacketRouterPacketUpV1;
 use helium_proto::Region;
 use lorawan::parser::EUI64;
 use lorawan::parser::{DataHeader, PhyPayload};
-
-use super::ul_token::{make_data_token, make_join_token};
-use super::{GWInfo, PRStartReq, ULMetaData};
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
 pub struct PacketHash(pub String);
@@ -17,8 +13,8 @@ pub type GatewayB58 = String;
 
 #[derive(Debug, Clone)]
 pub struct PacketUp {
-    packet: PacketRouterPacketUpV1,
-    recv_time: u64,
+    pub packet: PacketRouterPacketUpV1,
+    pub recv_time: u64,
 }
 
 impl PacketUp {
@@ -58,57 +54,6 @@ pub trait PacketUpTrait {
     fn frequency_mhz(&self) -> f64;
     fn recv_time(&self) -> String;
     fn timestamp(&self) -> u64;
-}
-
-/// Uplinks
-pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Result<PRStartReq> {
-    let packet = packets.first().expect("at least one packet");
-
-    let (devaddr, dev_eui, token) = match packet.routing_info() {
-        RoutingInfo::Eui { dev, .. } => (
-            None,
-            Some(dev),
-            make_join_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
-        ),
-        RoutingInfo::DevAddr(devaddr) => (
-            Some(devaddr),
-            None,
-            make_data_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
-        ),
-        RoutingInfo::Unknown => todo!("should never get here"),
-    };
-
-    let mut gw_info = vec![];
-    for packet in packets.iter() {
-        gw_info.push(GWInfo {
-            id: packet.gateway_mac_str(),
-            region: packet.region(),
-            rssi: packet.rssi(),
-            snr: packet.snr(),
-            dl_allowed: true,
-        });
-    }
-
-    Ok(PRStartReq {
-        protocol_version: "1.1".to_string(),
-        sender_nsid: config.sender_nsid.to_owned(),
-        receiver_nsid: config.receiver_nsid.to_owned(),
-        dedup_window_size: config.dedup_window.to_string(),
-        sender_id: config.helium_net_id.to_owned(),
-        receiver_id: config.target_net_id.to_owned(),
-        phy_payload: packet.json_payload(),
-        ul_meta_data: ULMetaData {
-            devaddr,
-            dev_eui,
-            data_rate: packet.datarate_index(),
-            ul_freq: packet.frequency_mhz(),
-            recv_time: packet.recv_time(),
-            rf_region: packet.region(),
-            fns_ul_token: token,
-            gw_cnt: gw_info.len(),
-            gw_info,
-        },
-    })
 }
 
 pub fn hz_to_mhz(hz: u32) -> f64 {
@@ -228,7 +173,7 @@ impl From<&str> for PacketHash {
 mod test {
     use lorawan::parser::PhyPayload;
 
-    use crate::protocol::uplink::RoutingInfo;
+    use crate::uplink::packet::RoutingInfo;
 
     #[test]
     fn eui_parse() {

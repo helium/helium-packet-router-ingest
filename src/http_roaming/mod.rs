@@ -1,9 +1,160 @@
-use self::ul_token::Token;
-use crate::{region, settings::ProtocolVersion};
+use tokio::sync::mpsc::{Receiver, Sender};
 
+use self::{
+    downlink::PacketDown,
+    settings::{ProtocolVersion, RoamingSettings},
+    ul_token::{make_data_token, make_join_token, Token},
+};
+use crate::{
+    region,
+    uplink::{
+        ingest::{GatewayID, GatewayTx, UplinkIngest},
+        packet::{GatewayB58, PacketHash, PacketUp, PacketUpTrait, RoutingInfo},
+    },
+    Result,
+};
+
+pub mod app;
+pub mod deduplicator;
 pub mod downlink;
+pub mod downlink_ingest;
+pub mod settings;
 pub mod ul_token;
-pub mod uplink;
+
+#[derive(Debug, Clone)]
+pub struct MsgSender(pub Sender<Msg>);
+pub type MsgReceiver = Receiver<Msg>;
+
+/// This message contains the entirety of the lifecycle of routing packets from hpr through http.
+///
+/// At a gateway's first packet, we register a downlink handler for a gateway.
+/// Once a gateway is known packets will be ingested normally.
+///
+/// Packets are sent to the deduplicator, which will group packets by hash.
+/// A `dedup_window` timer is started, after which the packets are forwarded to the roamer.
+/// After, a `cleanup_window` timer is started to prevent immediate double delivery of late packets.
+///   Setting this too short may result in double delivery of packet groups.
+///   Too long may lead to memory issues.
+#[derive(Debug)]
+pub enum Msg {
+    /// Incoming Packet from a Gateway.
+    UplinkReceive(PacketUp),
+    /// Deduplication timer has elapsed.
+    UplinkSend(PacketHash),
+    /// Cleanup timer has elapsed.
+    UplinkCleanup(PacketHash),
+    /// Downlink received for gateway from HTTP handler.
+    Downlink(PacketDown),
+    /// Gateway has Connected.
+    GatewayConnect(GatewayB58, GatewayTx),
+    /// Gateway has Disconnected.
+    GatewayDisconnect(GatewayB58),
+}
+
+#[tonic::async_trait]
+impl UplinkIngest for MsgSender {
+    async fn uplink_receive(&self, packet: PacketUp) {
+        metrics::increment_counter!("uplink_receive");
+        self.0
+            .send(Msg::UplinkReceive(packet))
+            .await
+            .expect("uplink");
+    }
+    async fn gateway_connect(&self, gw: GatewayID) {
+        metrics::increment_gauge!("connected_gateways", 1.0);
+        self.0
+            .send(Msg::GatewayConnect(gw.b58, gw.tx))
+            .await
+            .expect("gateway_connect");
+    }
+
+    async fn gateway_disconnect(&self, gateway: GatewayB58) {
+        metrics::decrement_gauge!("connected_gateways", 1.0);
+        self.0
+            .send(Msg::GatewayDisconnect(gateway))
+            .await
+            .expect("gateway_disconnect");
+    }
+}
+
+impl MsgSender {
+    pub fn new() -> (MsgSender, MsgReceiver) {
+        let (tx, rx) = tokio::sync::mpsc::channel(512);
+        (MsgSender(tx), rx)
+    }
+
+    pub async fn uplink_send(&self, key: PacketHash) {
+        metrics::increment_counter!("uplink_send");
+        self.0.send(Msg::UplinkSend(key)).await.expect("dedup done");
+    }
+
+    pub async fn uplink_cleanup(&self, key: PacketHash) {
+        metrics::increment_counter!("uplink cleanup");
+        self.0
+            .send(Msg::UplinkCleanup(key))
+            .await
+            .expect("dedup_cleanup");
+    }
+
+    pub async fn downlink(&self, downlink: PacketDown) {
+        metrics::increment_counter!("downlink");
+        self.0
+            .send(Msg::Downlink(downlink))
+            .await
+            .expect("downlink");
+    }
+}
+
+/// Uplinks
+pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Result<PRStartReq> {
+    let packet = packets.first().expect("at least one packet");
+
+    let (devaddr, dev_eui, token) = match packet.routing_info() {
+        RoutingInfo::Eui { dev, .. } => (
+            None,
+            Some(dev),
+            make_join_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
+        ),
+        RoutingInfo::DevAddr(devaddr) => (
+            Some(devaddr),
+            None,
+            make_data_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
+        ),
+        RoutingInfo::Unknown => todo!("should never get here"),
+    };
+
+    let mut gw_info = vec![];
+    for packet in packets.iter() {
+        gw_info.push(GWInfo {
+            id: packet.gateway_mac_str(),
+            region: packet.region(),
+            rssi: packet.rssi(),
+            snr: packet.snr(),
+            dl_allowed: true,
+        });
+    }
+
+    Ok(PRStartReq {
+        protocol_version: "1.1".to_string(),
+        sender_nsid: config.sender_nsid.to_owned(),
+        receiver_nsid: config.receiver_nsid.to_owned(),
+        dedup_window_size: config.dedup_window.to_string(),
+        sender_id: config.helium_net_id.to_owned(),
+        receiver_id: config.target_net_id.to_owned(),
+        phy_payload: packet.json_payload(),
+        ul_meta_data: ULMetaData {
+            devaddr,
+            dev_eui,
+            data_rate: packet.datarate_index(),
+            ul_freq: packet.frequency_mhz(),
+            recv_time: packet.recv_time(),
+            rf_region: packet.region(),
+            fns_ul_token: token,
+            gw_cnt: gw_info.len(),
+            gw_info,
+        },
+    })
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(tag = "MessageType")]

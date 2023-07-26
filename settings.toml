@@ -37,3 +37,6 @@
 
 # ## GRPC Uplink messages from Helium Packet Router.
 # uplink_listen = "0.0.0.0:9000"
+
+uplink_listen = "0.0.0.0:9000"
+lns_endpoint = "127.0.0.1:9006"

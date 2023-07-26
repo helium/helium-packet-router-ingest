@@ -1,28 +1,31 @@
 use duration_string::DurationString;
 use helium_proto::{services::router::PacketRouterPacketUpV1, Region};
 use hpr_http_rs::{
-    app::{self, MsgSender, UpdateAction},
-    protocol::{
+    http_roaming::{
+        self,
+        app::UpdateAction,
         downlink::parse_http_payload,
+        settings::{HttpSettings, NetworkSettings, ProtocolVersion, RoamingSettings},
         ul_token::make_join_token,
-        uplink::{PacketUp, PacketUpTrait},
-        HttpResponseResult,
+        HttpResponseResult, MsgSender,
     },
-    settings::{NetworkSettings, ProtocolVersion, RoamingSettings, Settings},
-    uplink_ingest::GatewayTx,
+    uplink::{
+        ingest::{GatewayID, GatewayTx, UplinkIngest},
+        packet::{PacketUp, PacketUpTrait},
+    },
     Result,
 };
 
 #[tokio::test]
 async fn first_seen_packet_starts_timer() -> Result {
-    let (tx, mut app) = make_app();
+    let (tx, mut app) = make_http_app();
 
     // queue uplink received message
     let packet = join_req_packet_up();
     tx.uplink_receive(packet.clone()).await;
 
     // tick one message
-    match app::handle_single_message(&mut app).await {
+    match http_roaming::app::handle_single_message(&mut app).await {
         UpdateAction::StartTimerForNewPacket(hash) => {
             assert_eq!(hash, packet.hash())
         }
@@ -34,15 +37,15 @@ async fn first_seen_packet_starts_timer() -> Result {
 
 #[tokio::test]
 async fn stores_duplicate_packets() -> Result {
-    let (tx, mut app) = make_app();
+    let (tx, mut app) = make_http_app();
 
     let packet1 = join_req_packet_up_from_gateway("one");
     let packet2 = join_req_packet_up_from_gateway("two");
     tx.uplink_receive(packet1.clone()).await;
     tx.uplink_receive(packet2.clone()).await;
 
-    let _first_action = app::handle_single_message(&mut app).await;
-    match app::handle_single_message(&mut app).await {
+    let _first_action = http_roaming::app::handle_single_message(&mut app).await;
+    match http_roaming::app::handle_single_message(&mut app).await {
         UpdateAction::Noop => (),
         _ => anyhow::bail!("expected second packet to result in nooop"),
     }
@@ -54,22 +57,28 @@ async fn stores_duplicate_packets() -> Result {
 
 #[tokio::test]
 async fn gateway_connect_disconnect() -> Result {
-    let (tx, mut app) = make_app();
+    let (tx, mut app) = make_http_app();
 
     let (gw, _gw_rx) = tokio::sync::mpsc::channel(1);
 
+    let gateway = GatewayID {
+        b58: "one".to_string(),
+        mac: "one".to_string(),
+        tx: GatewayTx(gw),
+    };
+
     // Gateway connect
-    tx.gateway_connect("one".to_string(), GatewayTx(gw)).await;
-    tx.gateway_disconnect("one".to_string()).await;
+    tx.gateway_connect(gateway.clone()).await;
+    tx.gateway_disconnect(gateway.b58).await;
     assert_eq!(0, app.gateway_count());
 
-    match app::handle_single_message(&mut app).await {
+    match http_roaming::app::handle_single_message(&mut app).await {
         UpdateAction::Noop => (),
         _ => anyhow::bail!("expected no action from gateway connect"),
     }
     assert_eq!(1, app.gateway_count());
 
-    match app::handle_single_message(&mut app).await {
+    match http_roaming::app::handle_single_message(&mut app).await {
         UpdateAction::Noop => (),
         _ => anyhow::bail!("expected no action from gateway disconnect"),
     }
@@ -80,12 +89,12 @@ async fn gateway_connect_disconnect() -> Result {
 
 #[tokio::test]
 async fn sending_non_existent_packet() -> Result {
-    let (tx, mut app) = make_app();
+    let (tx, mut app) = make_http_app();
 
     // Send message for packet hash never seen
     tx.uplink_send("fake-hash".into()).await;
 
-    match app::handle_single_message(&mut app).await {
+    match http_roaming::app::handle_single_message(&mut app).await {
         UpdateAction::Noop => (),
         _ => anyhow::bail!("expected no action from unknown packet hash"),
     }
@@ -95,7 +104,7 @@ async fn sending_non_existent_packet() -> Result {
 
 #[tokio::test]
 async fn sending_packet() -> Result {
-    let (tx, mut app) = make_app();
+    let (tx, mut app) = make_http_app();
 
     // Send message for packet hash never seen
     let packet = join_req_packet_up_from_gateway("one");
@@ -103,10 +112,10 @@ async fn sending_packet() -> Result {
     tx.uplink_send(packet.hash()).await;
 
     // ingest packet
-    app::handle_single_message(&mut app).await;
+    http_roaming::app::handle_single_message(&mut app).await;
     assert_eq!(1, app.current_packet_count());
 
-    match app::handle_single_message(&mut app).await {
+    match http_roaming::app::handle_single_message(&mut app).await {
         UpdateAction::UplinkSend(_json_body) => (),
         a => anyhow::bail!("expected send uplink from known packet hash: {a:?}"),
     }
@@ -116,12 +125,12 @@ async fn sending_packet() -> Result {
 
 #[tokio::test]
 async fn cleanup_unknown_packet() -> Result {
-    let (tx, mut app) = make_app();
+    let (tx, mut app) = make_http_app();
 
     // Send message for packet hash never seen
     tx.uplink_cleanup("fake-packet".into()).await;
 
-    match app::handle_single_message(&mut app).await {
+    match http_roaming::app::handle_single_message(&mut app).await {
         UpdateAction::Noop => (),
         _ => anyhow::bail!("expected no action from unknown packet hash"),
     }
@@ -131,7 +140,7 @@ async fn cleanup_unknown_packet() -> Result {
 
 #[tokio::test]
 async fn cleanup_packet() -> Result {
-    let (tx, mut app) = make_app();
+    let (tx, mut app) = make_http_app();
 
     // Send message for packet hash never seen
     let packet = join_req_packet_up_from_gateway("one");
@@ -139,10 +148,10 @@ async fn cleanup_packet() -> Result {
     tx.uplink_cleanup(packet.hash()).await;
 
     // ingest packet
-    app::handle_single_message(&mut app).await;
+    http_roaming::app::handle_single_message(&mut app).await;
     assert_eq!(1, app.current_packet_count());
 
-    match app::handle_single_message(&mut app).await {
+    match http_roaming::app::handle_single_message(&mut app).await {
         UpdateAction::Noop => (),
         _ => anyhow::bail!("expected no action from known packet hash"),
     }
@@ -153,7 +162,7 @@ async fn cleanup_packet() -> Result {
 
 #[tokio::test]
 async fn send_downlink_to_known_gateway() -> Result {
-    let (tx, mut app) = make_app();
+    let (tx, mut app) = make_http_app();
 
     let (gw_tx, _gw_rx) = tokio::sync::mpsc::channel(1);
 
@@ -161,15 +170,20 @@ async fn send_downlink_to_known_gateway() -> Result {
         .expect("result parseable")
         .expect("option contains downlink");
 
-    // Gateway Connect
-    tx.gateway_connect(downlink.gateway_b58.clone(), GatewayTx(gw_tx))
-        .await;
+    let gw = GatewayID {
+        b58: downlink.gateway_b58.clone(),
+        mac: "mac".to_string(),
+        tx: GatewayTx(gw_tx),
+    };
 
-    app::handle_single_message(&mut app).await;
+    // Gateway Connect
+    tx.gateway_connect(gw).await;
+
+    http_roaming::app::handle_single_message(&mut app).await;
     assert_eq!(1, app.gateway_count());
 
     tx.downlink(downlink).await;
-    match app::handle_single_message(&mut app).await {
+    match http_roaming::app::handle_single_message(&mut app).await {
         UpdateAction::DownlinkSend(_gw_chan, packet_down, http_response) => {
             assert_eq!(HttpResponseResult::Success, http_response.result);
             assert_eq!(packet_down, packet_down);
@@ -182,7 +196,7 @@ async fn send_downlink_to_known_gateway() -> Result {
 
 #[tokio::test]
 async fn downlink_to_unknown_gateway_responds_error() -> Result {
-    let (tx, mut app) = make_app();
+    let (tx, mut app) = make_http_app();
 
     let downlink = parse_http_payload(join_accept_payload(), &app.settings.roaming)
         .expect("result parseable")
@@ -191,7 +205,7 @@ async fn downlink_to_unknown_gateway_responds_error() -> Result {
     assert_eq!(0, app.gateway_count());
 
     tx.downlink(downlink).await;
-    match app::handle_single_message(&mut app).await {
+    match http_roaming::app::handle_single_message(&mut app).await {
         UpdateAction::DownlinkError(http_response) => {
             assert_eq!(HttpResponseResult::XmitFailed, http_response.result);
         }
@@ -224,15 +238,15 @@ fn join_req_packet_up_from_gateway(gw: &str) -> PacketUp {
     PacketUp::new(packet, 0)
 }
 
-fn make_app() -> (MsgSender, app::App) {
+fn make_http_app() -> (MsgSender, http_roaming::app::App) {
     let settings = default_settings();
     let (tx, rx) = MsgSender::new();
-    let app = app::App::new(tx.clone(), rx, settings);
+    let app = http_roaming::app::App::new(tx.clone(), rx, settings);
     (tx, app)
 }
 
-fn default_settings() -> Settings {
-    Settings {
+fn default_settings() -> HttpSettings {
+    HttpSettings {
         roaming: RoamingSettings {
             protocol_version: ProtocolVersion::default(),
             helium_net_id: "C00053".to_string(),

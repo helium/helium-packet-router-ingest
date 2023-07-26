@@ -1,15 +1,14 @@
+use super::{
+    settings::RoamingSettings, ul_token::PacketType, ClassMode, DLMetaData, HttpResponse,
+    HttpResponseMessageType, HttpResponseResult,
+};
 use crate::{
-    protocol::{PRStartAns, PRStartAnsPlain, XmitDataReq},
+    http_roaming::{PRStartAns, PRStartAnsPlain, XmitDataReq},
     region::downlink_datarate,
-    settings::RoamingSettings,
+    uplink::packet::GatewayB58,
     Result,
 };
 use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
-
-use super::{
-    ul_token::PacketType, uplink::GatewayB58, ClassMode, DLMetaData, HttpResponse,
-    HttpResponseMessageType, HttpResponseResult,
-};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct PacketDown {
@@ -213,13 +212,13 @@ fn add_delay(timestamp: u64, add: u64) -> u64 {
 mod test {
     use super::PacketDown;
     use crate::{
-        protocol::{
+        http_roaming::{
             downlink::ToPacketDown,
+            settings::RoamingSettings,
             ul_token::{make_data_token, make_join_token},
             PRStartAns,
         },
         region::{downlink_datarate, Region},
-        settings::RoamingSettings,
         Result,
     };
     use duration_string::DurationString;

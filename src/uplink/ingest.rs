@@ -1,10 +1,6 @@
 use std::{net::SocketAddr, time::Duration};
 
-use crate::{
-    app::MsgSender,
-    protocol::uplink::{PacketUp, PacketUpTrait},
-    Result,
-};
+use crate::{uplink::packet::PacketUpTrait, Result};
 use helium_proto::services::router::{
     envelope_down_v1, envelope_up_v1, packet_server::Packet, packet_server::PacketServer,
     EnvelopeDownV1, EnvelopeUpV1, PacketRouterPacketDownV1,
@@ -12,10 +8,24 @@ use helium_proto::services::router::{
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::instrument;
 
-#[instrument]
-pub async fn start(sender: MsgSender, addr: SocketAddr) -> Result {
+use super::packet::PacketUp;
+
+#[derive(Debug, Clone)]
+pub struct GatewayID {
+    pub b58: String,
+    pub mac: String,
+    pub tx: GatewayTx,
+}
+
+#[tonic::async_trait]
+pub trait UplinkIngest: Send + Sync {
+    async fn gateway_connect(&self, gateway: GatewayID);
+    async fn uplink_receive(&self, packet: PacketUp);
+    async fn gateway_disconnect(&self, gateway_b58: String);
+}
+
+pub async fn start<S: UplinkIngest + Clone>(sender: S, addr: SocketAddr) -> Result {
     tonic::transport::Server::builder()
         .add_service(PacketServer::new(Gateways::new(sender)))
         .serve(addr)
@@ -23,13 +33,18 @@ pub async fn start(sender: MsgSender, addr: SocketAddr) -> Result {
         .map_err(anyhow::Error::from)
 }
 
-#[derive(Debug)]
-struct Gateways {
-    sender: MsgSender,
+struct Gateways<S>
+where
+    S: UplinkIngest + 'static,
+{
+    sender: S,
 }
 
-impl Gateways {
-    pub fn new(sender: MsgSender) -> Self {
+impl<S> Gateways<S>
+where
+    S: UplinkIngest + 'static,
+{
+    pub fn new(sender: S) -> Self {
         Self { sender }
     }
 }
@@ -49,7 +64,10 @@ impl GatewayTx {
 }
 
 #[tonic::async_trait]
-impl Packet for Gateways {
+impl<S> Packet for Gateways<S>
+where
+    S: UplinkIngest + 'static + Clone,
+{
     type routeStream = ReceiverStream<Result<EnvelopeDownV1, Status>>;
 
     async fn route(
@@ -90,9 +108,12 @@ impl Packet for Gateways {
                                 if gateway_b58.is_none() {
                                     let b58 = packet.gateway_b58();
                                     gateway_b58 = Some(b58.clone());
-                                    sender
-                                        .gateway_connect(b58, GatewayTx(downlink_sender.clone()))
-                                        .await;
+                                    let gw = GatewayID {
+                                        b58: packet.gateway_b58(),
+                                        mac: packet.gateway_mac_str(),
+                                        tx: GatewayTx(downlink_sender.clone()),
+                                    };
+                                    sender.gateway_connect(gw).await;
                                 }
                                 uplinks += 1;
                                 sender.uplink_receive(packet).await;
