@@ -105,20 +105,24 @@ pub async fn handle_update_action(_app: &App, action: UpdateAction) {
 pub async fn new_client(app: &mut App, gw: GatewayID) {
     tracing::debug!(?app.settings.lns_endpoint, gw.b58, "starting a new udp client for gateway");
     let mac_address = MacAddress::from_str(&gw.mac).expect("mac address from b58");
+
+    let mut endpoint = app.settings.lns_endpoint.clone();
+    if let Some(&port) = app.settings.region_port_mapping.get(&gw.region) {
+        endpoint.set_port(port);
+    }
+
     // UplinkForwarder: Give this channel packets to send over UDP
     // DownlinkReceiver: Channel coming downstream from UDP
     let (uplink_forwarder, mut downlink_receiver, udp_runtime) =
-        semtech_udp::client_runtime::UdpRuntime::new(
-            mac_address,
-            app.settings.lns_endpoint.clone(),
-        )
-        .await
-        .expect("create udp runtime");
+        semtech_udp::client_runtime::UdpRuntime::new(mac_address, endpoint)
+            .await
+            .expect("create udp runtime");
     let (shutdown_trigger, shutdown_listener) = triggered::trigger();
     app.forward_chans.insert(
         gw.mac.to_string(),
         (uplink_forwarder, gw.tx, shutdown_trigger),
     );
+
     // TODO: Move this out of here
     // Start the UDP runtime
     tokio::spawn(udp_runtime.run(shutdown_listener));
