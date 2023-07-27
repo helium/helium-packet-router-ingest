@@ -11,12 +11,6 @@ pub struct PacketUp {
     pub recv_time: u64,
 }
 
-impl PacketUp {
-    pub fn new(packet: PacketRouterPacketUpV1, recv_time: u64) -> Self {
-        Self { packet, recv_time }
-    }
-}
-
 impl From<PacketRouterPacketUpV1> for PacketUp {
     fn from(value: PacketRouterPacketUpV1) -> Self {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -28,64 +22,27 @@ impl From<PacketRouterPacketUpV1> for PacketUp {
     }
 }
 
-#[derive(Debug, PartialEq)]
-pub enum RoutingInfo {
-    Eui { app: Eui, dev: Eui },
-    DevAddr(DevAddr),
-    Unknown,
-}
-
-pub trait PacketUpTrait {
-    fn gateway_b58(&self) -> GatewayB58;
-    fn hash(&self) -> PacketHash;
-    fn routing_info(&self) -> RoutingInfo;
-    fn gateway_mac(&self) -> GatewayMac;
-    fn rssi(&self) -> i32;
-    fn snr(&self) -> f32;
-    fn region(&self) -> Region;
-    fn json_payload(&self) -> String;
-    fn datarate_index(&self) -> region::DR;
-    fn frequency_mhz(&self) -> f64;
-    fn recv_time(&self) -> String;
-    fn timestamp(&self) -> u64;
-}
-
-pub fn hz_to_mhz(hz: u32) -> f64 {
-    // NOTE: f64 is important, if it goes down to f32 we start to see rounding errors.
-    // Truncate -> Round -> Truncate
-    let freq = hz / 1_000;
-    freq as f64 / 1_000.0
-}
-
-impl RoutingInfo {
-    pub fn eui(app: EUI64<&[u8]>, dev: EUI64<&[u8]>) -> Self {
-        Self::Eui {
-            app: app.into(),
-            dev: dev.into(),
-        }
+impl PacketUp {
+    pub fn new(packet: PacketRouterPacketUpV1, recv_time: u64) -> Self {
+        Self { packet, recv_time }
     }
-    pub fn devaddr(devaddr: lorawan::parser::DevAddr<&[u8]>) -> Self {
-        Self::DevAddr(devaddr.into())
-    }
-}
 
-impl PacketUpTrait for PacketUp {
-    fn gateway_b58(&self) -> GatewayB58 {
+    pub fn gateway_b58(&self) -> GatewayB58 {
         let gw = &self.packet.gateway;
         gw.into()
     }
 
-    fn gateway_mac(&self) -> GatewayMac {
+    pub fn gateway_mac(&self) -> GatewayMac {
         let gw = &self.packet.gateway;
         gw.into()
     }
 
-    fn hash(&self) -> PacketHash {
+    pub fn hash(&self) -> PacketHash {
         use sha2::{Digest, Sha256};
         PacketHash(String::from_utf8_lossy(&Sha256::digest(&self.packet.payload)).into())
     }
 
-    fn routing_info(&self) -> RoutingInfo {
+    pub fn routing_info(&self) -> RoutingInfo {
         let payload = &self.packet.payload;
         tracing::trace!(?payload, "payload");
         match lorawan::parser::parse(payload.clone()).expect("valid packet") {
@@ -105,33 +62,33 @@ impl PacketUpTrait for PacketUp {
         }
     }
 
-    fn region(&self) -> Region {
+    pub fn region(&self) -> Region {
         self.packet.region()
     }
 
-    fn rssi(&self) -> i32 {
+    pub fn rssi(&self) -> i32 {
         self.packet.rssi
     }
 
-    fn snr(&self) -> f32 {
+    pub fn snr(&self) -> f32 {
         self.packet.snr
     }
 
-    fn json_payload(&self) -> String {
+    pub fn json_payload(&self) -> String {
         hex::encode(&self.packet.payload)
     }
 
-    fn datarate_index(&self) -> region::DR {
+    pub fn datarate_index(&self) -> region::DR {
         region::uplink_datarate(self.region(), self.packet.datarate())
             .expect("valid uplink datarate index")
     }
 
-    fn frequency_mhz(&self) -> f64 {
+    pub fn frequency_mhz(&self) -> f64 {
         hz_to_mhz(self.packet.frequency)
     }
 
     /// This is the time the NS received the packet.
-    fn recv_time(&self) -> String {
+    pub fn recv_time(&self) -> String {
         use chrono::{DateTime, NaiveDateTime, Utc};
         let dt = DateTime::<Utc>::from_utc(
             NaiveDateTime::from_timestamp_millis(self.recv_time as i64).expect("valid timestamp"),
@@ -140,8 +97,34 @@ impl PacketUpTrait for PacketUp {
         dt.to_rfc3339()
     }
 
-    fn timestamp(&self) -> u64 {
+    pub fn timestamp(&self) -> u64 {
         self.packet.timestamp
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum RoutingInfo {
+    Eui { app: Eui, dev: Eui },
+    DevAddr(DevAddr),
+    Unknown,
+}
+
+pub fn hz_to_mhz(hz: u32) -> f64 {
+    // NOTE: f64 is important, if it goes down to f32 we start to see rounding errors.
+    // Truncate -> Round -> Truncate
+    let freq = hz / 1_000;
+    freq as f64 / 1_000.0
+}
+
+impl RoutingInfo {
+    pub fn eui(app: EUI64<&[u8]>, dev: EUI64<&[u8]>) -> Self {
+        Self::Eui {
+            app: app.into(),
+            dev: dev.into(),
+        }
+    }
+    pub fn devaddr(devaddr: lorawan::parser::DevAddr<&[u8]>) -> Self {
+        Self::DevAddr(devaddr.into())
     }
 }
 

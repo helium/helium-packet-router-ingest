@@ -9,7 +9,7 @@ use crate::{
     region,
     uplink::{
         ingest::UplinkIngest,
-        packet::{PacketUp, PacketUpTrait, RoutingInfo},
+        packet::{PacketUp, RoutingInfo},
         DevAddr, Eui, Gateway, GatewayB58, GatewayMac, GatewayTx, PacketHash,
     },
     Result,

@@ -1,9 +1,6 @@
 use super::{packet::to_packet_down, settings::GwmpSettings, Msg, MsgReceiver, MsgSender};
 use crate::{
-    uplink::{
-        packet::{PacketUp, PacketUpTrait},
-        Gateway, GatewayMac, GatewayTx,
-    },
+    uplink::{packet::PacketUp, Gateway, GatewayMac, GatewayTx},
     Result,
 };
 use semtech_udp::client_runtime::{self, ClientTx, DownlinkRequest, Event, UdpRuntime};
@@ -156,7 +153,7 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
 }
 
 fn endpoint_for_gateway(app: &App, gw: &Gateway) -> SocketAddr {
-    let mut endpoint = app.settings.lns_endpoint.clone();
+    let mut endpoint = app.settings.lns_endpoint;
     if let Some(&port) = app.settings.region_port_mapping.get(&gw.region) {
         endpoint.set_port(port);
     }

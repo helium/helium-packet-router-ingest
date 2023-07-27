@@ -11,11 +11,7 @@ use hpr_http_rs::{
         ul_token::make_join_token,
         HttpResponseResult,
     },
-    uplink::{
-        ingest::UplinkIngest,
-        packet::{PacketUp, PacketUpTrait},
-        Gateway, GatewayB58, GatewayMac, GatewayTx,
-    },
+    uplink::{ingest::UplinkIngest, packet::PacketUp, Gateway, GatewayB58, GatewayMac, GatewayTx},
     Result,
 };
 

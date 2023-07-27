@@ -1,4 +1,4 @@
-use crate::uplink::packet::{PacketUp, PacketUpTrait};
+use crate::uplink::packet::PacketUp;
 use helium_proto::{
     services::router::{PacketRouterPacketDownV1, WindowV1},
     DataRate,

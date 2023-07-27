@@ -10,7 +10,7 @@ use std::str::FromStr;
 use tokio::sync::mpsc::Sender;
 use tonic::Status;
 
-use self::packet::{PacketUp, PacketUpTrait};
+use self::packet::PacketUp;
 
 pub mod ingest;
 pub mod packet;
@@ -98,7 +98,7 @@ impl From<&Vec<u8>> for GatewayMac {
 impl From<GatewayB58> for GatewayMac {
     fn from(value: GatewayB58) -> Self {
         let data = PublicKeyBinary::from_str(&value.0).expect("valid b58");
-        let hash = xxhash_rust::xxh64::xxh64(&data.as_ref(), 0);
+        let hash = xxhash_rust::xxh64::xxh64(data.as_ref(), 0);
         let hash = hash.to_be_bytes();
         Self(hex::encode(hash))
     }
