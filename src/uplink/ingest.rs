@@ -1,9 +1,12 @@
 use std::{net::SocketAddr, time::Duration};
 
 use crate::{uplink::packet::PacketUpTrait, Result};
-use helium_proto::services::router::{
-    envelope_down_v1, envelope_up_v1, packet_server::Packet, packet_server::PacketServer,
-    EnvelopeDownV1, EnvelopeUpV1, PacketRouterPacketDownV1,
+use helium_proto::{
+    services::router::{
+        envelope_down_v1, envelope_up_v1, packet_server::Packet, packet_server::PacketServer,
+        EnvelopeDownV1, EnvelopeUpV1, PacketRouterPacketDownV1,
+    },
+    Region,
 };
 use tokio::sync::mpsc::Sender;
 use tokio_stream::wrappers::ReceiverStream;
@@ -15,6 +18,7 @@ use super::packet::PacketUp;
 pub struct GatewayID {
     pub b58: String,
     pub mac: String,
+    pub region: Region,
     pub tx: GatewayTx,
 }
 
@@ -111,6 +115,7 @@ where
                                     let gw = GatewayID {
                                         b58: packet.gateway_b58(),
                                         mac: packet.gateway_mac_str(),
+                                        region: packet.region(),
                                         tx: GatewayTx(downlink_sender.clone()),
                                     };
                                     sender.gateway_connect(gw).await;

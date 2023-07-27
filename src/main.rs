@@ -84,6 +84,10 @@ pub async fn run_gwmp(settings: GwmpSettings) {
     tracing::info!("=====================================");
     tracing::info!("metrics listen  :: {metrics_listen_addr}");
     tracing::info!("uplink listen   :: {grpc_listen_addr}");
+    tracing::info!("Region mappings ::");
+    for (region, port) in settings.region_port_mapping.iter() {
+        tracing::info!("  {:<13} :: {port}", region.to_string());
+    }
     tracing::info!("=====================================");
 
     start_metrics(metrics_listen_addr);

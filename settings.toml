@@ -39,4 +39,9 @@
 # uplink_listen = "0.0.0.0:9000"
 
 uplink_listen = "0.0.0.0:9000"
-lns_endpoint = "127.0.0.1:9006"
+lns_endpoint = "127.0.0.1:9008"
+
+[region_port_mapping]
+# Leave empty for no mapping
+Us915 = 9006
+Eu868 = 9007

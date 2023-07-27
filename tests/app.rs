@@ -1,13 +1,15 @@
 use duration_string::DurationString;
+use helium_crypto::PublicKeyBinary;
 use helium_proto::{services::router::PacketRouterPacketUpV1, Region};
 use hpr_http_rs::{
+    gwmp::{self, app::UpdateAction as GwmpUpdateAction, settings::GwmpSettings},
     http_roaming::{
         self,
-        app::UpdateAction,
+        app::UpdateAction as HttpUpdateAction,
         downlink::parse_http_payload,
         settings::{HttpSettings, NetworkSettings, ProtocolVersion, RoamingSettings},
         ul_token::make_join_token,
-        HttpResponseResult, MsgSender,
+        HttpResponseResult,
     },
     uplink::{
         ingest::{GatewayID, GatewayTx, UplinkIngest},
@@ -26,7 +28,7 @@ async fn first_seen_packet_starts_timer() -> Result {
 
     // tick one message
     match http_roaming::app::handle_single_message(&mut app).await {
-        UpdateAction::StartTimerForNewPacket(hash) => {
+        HttpUpdateAction::StartTimerForNewPacket(hash) => {
             assert_eq!(hash, packet.hash())
         }
         _ => anyhow::bail!("expected start timer for new packet message"),
@@ -46,7 +48,7 @@ async fn stores_duplicate_packets() -> Result {
 
     let _first_action = http_roaming::app::handle_single_message(&mut app).await;
     match http_roaming::app::handle_single_message(&mut app).await {
-        UpdateAction::Noop => (),
+        HttpUpdateAction::Noop => (),
         _ => anyhow::bail!("expected second packet to result in nooop"),
     }
     assert_eq!(1, app.current_packet_count());
@@ -56,7 +58,7 @@ async fn stores_duplicate_packets() -> Result {
 }
 
 #[tokio::test]
-async fn gateway_connect_disconnect() -> Result {
+async fn http_gateway_connect_disconnect() -> Result {
     let (tx, mut app) = make_http_app();
 
     let (gw, _gw_rx) = tokio::sync::mpsc::channel(1);
@@ -64,6 +66,7 @@ async fn gateway_connect_disconnect() -> Result {
     let gateway = GatewayID {
         b58: "one".to_string(),
         mac: "one".to_string(),
+        region: Region::Us915,
         tx: GatewayTx(gw),
     };
 
@@ -73,18 +76,64 @@ async fn gateway_connect_disconnect() -> Result {
     assert_eq!(0, app.gateway_count());
 
     match http_roaming::app::handle_single_message(&mut app).await {
-        UpdateAction::Noop => (),
+        HttpUpdateAction::Noop => (),
         _ => anyhow::bail!("expected no action from gateway connect"),
     }
     assert_eq!(1, app.gateway_count());
 
     match http_roaming::app::handle_single_message(&mut app).await {
-        UpdateAction::Noop => (),
+        HttpUpdateAction::Noop => (),
         _ => anyhow::bail!("expected no action from gateway disconnect"),
     }
     assert_eq!(0, app.gateway_count());
 
     Ok(())
+}
+
+#[tokio::test]
+async fn gwmp_gateway_connect_disconnect() -> Result {
+    let (tx, mut app) = make_gwmp_app();
+
+    let (gw, _gw_rx) = tokio::sync::mpsc::channel(1);
+
+    let gateway = GatewayID {
+        b58: "13jnwnZYLDgw9Kd4zp33cyx4tBNQJ4jMoNvHTiFyvUkAgkhQUz9".to_string(),
+        mac: "86213a0f50bce10e".to_string(),
+        region: Region::Us915,
+        tx: GatewayTx(gw),
+    };
+
+    // Gateway connect
+    tx.gateway_connect(gateway.clone()).await;
+    tx.gateway_disconnect(gateway.b58).await;
+    assert_eq!(0, app.gateway_count());
+
+    match gwmp::app::handle_single_message(&mut app).await {
+        GwmpUpdateAction::Noop => (),
+        _ => anyhow::bail!("expected no action from gateway connect"),
+    }
+    assert_eq!(1, app.gateway_count());
+
+    match gwmp::app::handle_single_message(&mut app).await {
+        GwmpUpdateAction::Noop => (),
+        _ => anyhow::bail!("expected no action from gateway disconnect"),
+    }
+    assert_eq!(0, app.gateway_count());
+
+    Ok(())
+}
+
+#[test]
+fn gateway_vars() {
+    let gw = vec![
+        1, 104, 142, 151, 96, 143, 225, 209, 138, 18, 147, 96, 234, 13, 136, 61, 141, 21, 85, 67,
+        15, 109, 219, 21, 144, 79, 162, 164, 169, 83, 242, 111, 165,
+    ];
+    let b58 = PublicKeyBinary::from(&gw[..]).to_string();
+    let mac = hex::encode(xxhash_rust::xxh64::xxh64(&gw[1..], 0).to_be_bytes());
+
+    println!("b58: {b58}");
+    println!("mac: {mac}");
 }
 
 #[tokio::test]
@@ -95,7 +144,7 @@ async fn sending_non_existent_packet() -> Result {
     tx.uplink_send("fake-hash".into()).await;
 
     match http_roaming::app::handle_single_message(&mut app).await {
-        UpdateAction::Noop => (),
+        HttpUpdateAction::Noop => (),
         _ => anyhow::bail!("expected no action from unknown packet hash"),
     }
 
@@ -116,7 +165,7 @@ async fn sending_packet() -> Result {
     assert_eq!(1, app.current_packet_count());
 
     match http_roaming::app::handle_single_message(&mut app).await {
-        UpdateAction::UplinkSend(_json_body) => (),
+        HttpUpdateAction::UplinkSend(_json_body) => (),
         a => anyhow::bail!("expected send uplink from known packet hash: {a:?}"),
     }
 
@@ -131,7 +180,7 @@ async fn cleanup_unknown_packet() -> Result {
     tx.uplink_cleanup("fake-packet".into()).await;
 
     match http_roaming::app::handle_single_message(&mut app).await {
-        UpdateAction::Noop => (),
+        HttpUpdateAction::Noop => (),
         _ => anyhow::bail!("expected no action from unknown packet hash"),
     }
 
@@ -152,7 +201,7 @@ async fn cleanup_packet() -> Result {
     assert_eq!(1, app.current_packet_count());
 
     match http_roaming::app::handle_single_message(&mut app).await {
-        UpdateAction::Noop => (),
+        HttpUpdateAction::Noop => (),
         _ => anyhow::bail!("expected no action from known packet hash"),
     }
     assert_eq!(0, app.current_packet_count());
@@ -173,6 +222,7 @@ async fn send_downlink_to_known_gateway() -> Result {
     let gw = GatewayID {
         b58: downlink.gateway_b58.clone(),
         mac: "mac".to_string(),
+        region: Region::Us915,
         tx: GatewayTx(gw_tx),
     };
 
@@ -184,7 +234,7 @@ async fn send_downlink_to_known_gateway() -> Result {
 
     tx.downlink(downlink).await;
     match http_roaming::app::handle_single_message(&mut app).await {
-        UpdateAction::DownlinkSend(_gw_chan, packet_down, http_response) => {
+        HttpUpdateAction::DownlinkSend(_gw_chan, packet_down, http_response) => {
             assert_eq!(HttpResponseResult::Success, http_response.result);
             assert_eq!(packet_down, packet_down);
         }
@@ -206,7 +256,7 @@ async fn downlink_to_unknown_gateway_responds_error() -> Result {
 
     tx.downlink(downlink).await;
     match http_roaming::app::handle_single_message(&mut app).await {
-        UpdateAction::DownlinkError(http_response) => {
+        HttpUpdateAction::DownlinkError(http_response) => {
             assert_eq!(HttpResponseResult::XmitFailed, http_response.result);
         }
         x => anyhow::bail!("expected downlink action got: {x:?}"),
@@ -238,14 +288,14 @@ fn join_req_packet_up_from_gateway(gw: &str) -> PacketUp {
     PacketUp::new(packet, 0)
 }
 
-fn make_http_app() -> (MsgSender, http_roaming::app::App) {
-    let settings = default_settings();
-    let (tx, rx) = MsgSender::new();
+fn make_http_app() -> (http_roaming::MsgSender, http_roaming::app::App) {
+    let settings = default_http_roaming_settings();
+    let (tx, rx) = http_roaming::MsgSender::new();
     let app = http_roaming::app::App::new(tx.clone(), rx, settings);
     (tx, app)
 }
 
-fn default_settings() -> HttpSettings {
+fn default_http_roaming_settings() -> HttpSettings {
     HttpSettings {
         roaming: RoamingSettings {
             protocol_version: ProtocolVersion::default(),
@@ -263,6 +313,22 @@ fn default_settings() -> HttpSettings {
         },
         cleanup_window: DurationString::from_string("10s".to_string()).unwrap(),
         metrics_listen: "0.0.0.0:9002".parse().unwrap(),
+    }
+}
+
+fn make_gwmp_app() -> (gwmp::MsgSender, gwmp::app::App) {
+    let settings = default_gwmp_settings();
+    let (tx, rx) = gwmp::MsgSender::new();
+    let app = gwmp::app::App::new(tx.clone(), rx, settings);
+    (tx, app)
+}
+
+fn default_gwmp_settings() -> GwmpSettings {
+    GwmpSettings {
+        metrics_listen: "0.0.0.0:9002".parse().unwrap(),
+        uplink_listen: "0.0.0.0:9001".parse().unwrap(),
+        lns_endpoint: "127.0.0.1:1700".parse().unwrap(),
+        region_port_mapping: Default::default(),
     }
 }
 

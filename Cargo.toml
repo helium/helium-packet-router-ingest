@@ -33,3 +33,4 @@ reqwest-tracing = "0.4.5"
 reqwest-middleware = "0.2.2"
 semtech-udp = { version = "0.10.8", features = ["client"] }
 triggered = "0.1.2"
+toml = "0.7.6"
