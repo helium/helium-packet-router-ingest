@@ -1,4 +1,4 @@
-use crate::uplink::{ingest::UplinkIngest, packet::PacketUp, Gateway, GatewayMac};
+use crate::uplink::{ingest::UplinkIngest, packet::PacketUp, Gateway};
 use semtech_udp::client_runtime::DownlinkRequest;
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -14,8 +14,8 @@ pub type MsgReceiver = Receiver<Msg>;
 pub enum Msg {
     Uplink(PacketUp),
     GatewayConnect(Gateway),
-    GatewayDisconnect(GatewayMac),
-    Downlink(GatewayMac, DownlinkRequest),
+    GatewayDisconnect(Gateway),
+    Downlink(Gateway, DownlinkRequest),
 }
 
 impl MsgSender {
@@ -24,7 +24,7 @@ impl MsgSender {
         (MsgSender(tx), rx)
     }
 
-    pub async fn send_downlink(&self, gw_b58: GatewayMac, txpk: DownlinkRequest) {
+    pub async fn send_downlink(&self, gw_b58: Gateway, txpk: DownlinkRequest) {
         self.0
             .send(Msg::Downlink(gw_b58, txpk))
             .await
@@ -47,7 +47,7 @@ impl UplinkIngest for MsgSender {
 
     async fn gateway_disconnect(&self, gw: Gateway) {
         self.0
-            .send(Msg::GatewayDisconnect(gw.mac))
+            .send(Msg::GatewayDisconnect(gw))
             .await
             .expect("gateway disconnect");
     }

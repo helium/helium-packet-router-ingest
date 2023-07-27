@@ -121,7 +121,7 @@ pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Resu
             None,
             make_data_token(packet.gateway_b58(), packet.timestamp(), packet.region()),
         ),
-        RoutingInfo::Unknown => todo!("should never get here"),
+        RoutingInfo::Unknown => anyhow::bail!("packet contains unparseable routing information"),
     };
 
     let mut gw_info = vec![];
