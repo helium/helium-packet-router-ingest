@@ -1,4 +1,7 @@
-use crate::uplink::packet::{PacketHash, PacketUp, PacketUpTrait};
+use crate::uplink::{
+    packet::{PacketUp, PacketUpTrait},
+    PacketHash,
+};
 use std::collections::HashMap;
 
 #[derive(Default)]

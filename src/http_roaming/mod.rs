@@ -8,8 +8,9 @@ use self::{
 use crate::{
     region,
     uplink::{
-        ingest::{GatewayID, GatewayTx, UplinkIngest},
-        packet::{GatewayB58, PacketHash, PacketUp, PacketUpTrait, RoutingInfo},
+        ingest::UplinkIngest,
+        packet::{PacketUp, PacketUpTrait, RoutingInfo},
+        DevAddr, Eui, Gateway, GatewayB58, GatewayMac, GatewayTx, PacketHash,
     },
     Result,
 };
@@ -60,7 +61,7 @@ impl UplinkIngest for MsgSender {
             .await
             .expect("uplink");
     }
-    async fn gateway_connect(&self, gw: GatewayID) {
+    async fn gateway_connect(&self, gw: Gateway) {
         metrics::increment_gauge!("connected_gateways", 1.0);
         self.0
             .send(Msg::GatewayConnect(gw.b58, gw.tx))
@@ -68,10 +69,10 @@ impl UplinkIngest for MsgSender {
             .expect("gateway_connect");
     }
 
-    async fn gateway_disconnect(&self, gateway: GatewayB58) {
+    async fn gateway_disconnect(&self, gateway: Gateway) {
         metrics::decrement_gauge!("connected_gateways", 1.0);
         self.0
-            .send(Msg::GatewayDisconnect(gateway))
+            .send(Msg::GatewayDisconnect(gateway.b58))
             .await
             .expect("gateway_disconnect");
     }
@@ -126,7 +127,7 @@ pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Resu
     let mut gw_info = vec![];
     for packet in packets.iter() {
         gw_info.push(GWInfo {
-            id: packet.gateway_mac_str(),
+            id: packet.gateway_mac(),
             region: packet.region(),
             rssi: packet.rssi(),
             snr: packet.snr(),
@@ -180,9 +181,9 @@ pub struct PRStartReq {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ULMetaData {
     #[serde(rename = "DevAddr")]
-    pub devaddr: Option<String>,
+    pub devaddr: Option<DevAddr>,
     #[serde(rename = "DevEUI")]
-    pub dev_eui: Option<String>,
+    pub dev_eui: Option<Eui>,
     #[serde(rename = "DataRate")]
     pub data_rate: region::DR,
     #[serde(rename = "ULFreq")]
@@ -202,7 +203,7 @@ pub struct ULMetaData {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct GWInfo {
     #[serde(rename = "ID")]
-    pub id: String,
+    pub id: GatewayMac,
     #[serde(rename = "RFRegion")]
     pub region: region::Region,
     #[serde(rename = "RSSI")]

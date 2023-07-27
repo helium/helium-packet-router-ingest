@@ -1,6 +1,7 @@
-use crate::uplink::packet::GatewayB58;
 use helium_proto::Region;
 use hex::FromHex;
+
+use crate::uplink::GatewayB58;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 pub struct Token {

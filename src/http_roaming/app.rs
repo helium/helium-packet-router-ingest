@@ -5,9 +5,7 @@ use super::{
 };
 use crate::{
     http_roaming::{downlink::PacketDown, make_pr_start_req, HttpResponse, PRStartReq},
-    uplink::ingest::GatewayTx,
-    uplink::packet::{GatewayB58, PacketHash},
-    Result,
+    Result, uplink::{GatewayB58, GatewayTx, PacketHash},
 };
 use axum::http::HeaderMap;
 use reqwest::header;
@@ -122,7 +120,7 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
         Msg::Downlink(packet_down) => match app.gateway_map.get(&packet_down.gateway_b58) {
             None => {
                 tracing::warn!(
-                    gw = packet_down.gateway_b58,
+                    ?packet_down.gateway_b58,
                     "join accept for unknown gateway"
                 );
                 UpdateAction::DownlinkError(packet_down.http_response.xmit_failed())
@@ -163,7 +161,7 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
         }
         UpdateAction::DownlinkSend(gw_tx, packet_down, http_response) => {
             gw_tx.send_downlink(packet_down.downlink).await;
-            tracing::info!(gw = packet_down.gateway_b58, "downlink sent");
+            tracing::info!(?packet_down.gateway_b58, "downlink sent");
 
             if http_response.should_send_for_protocol(&app.settings.roaming.protocol_version) {
                 let lns_endpoint = app.settings.network.lns_endpoint.clone();

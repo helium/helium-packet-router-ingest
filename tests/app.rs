@@ -12,8 +12,9 @@ use hpr_http_rs::{
         HttpResponseResult,
     },
     uplink::{
-        ingest::{GatewayID, GatewayTx, UplinkIngest},
+        ingest::UplinkIngest,
         packet::{PacketUp, PacketUpTrait},
+        Gateway, GatewayB58, GatewayMac, GatewayTx,
     },
     Result,
 };
@@ -63,16 +64,16 @@ async fn http_gateway_connect_disconnect() -> Result {
 
     let (gw, _gw_rx) = tokio::sync::mpsc::channel(1);
 
-    let gateway = GatewayID {
-        b58: "one".to_string(),
-        mac: "one".to_string(),
+    let gateway = Gateway {
+        b58: GatewayB58("one".to_string()),
+        mac: GatewayMac("one".to_string()),
         region: Region::Us915,
         tx: GatewayTx(gw),
     };
 
     // Gateway connect
     tx.gateway_connect(gateway.clone()).await;
-    tx.gateway_disconnect(gateway.b58).await;
+    tx.gateway_disconnect(gateway).await;
     assert_eq!(0, app.gateway_count());
 
     match http_roaming::app::handle_single_message(&mut app).await {
@@ -96,16 +97,16 @@ async fn gwmp_gateway_connect_disconnect() -> Result {
 
     let (gw, _gw_rx) = tokio::sync::mpsc::channel(1);
 
-    let gateway = GatewayID {
-        b58: "13jnwnZYLDgw9Kd4zp33cyx4tBNQJ4jMoNvHTiFyvUkAgkhQUz9".to_string(),
-        mac: "86213a0f50bce10e".to_string(),
+    let gateway = Gateway {
+        b58: GatewayB58("13jnwnZYLDgw9Kd4zp33cyx4tBNQJ4jMoNvHTiFyvUkAgkhQUz9".to_string()),
+        mac: GatewayMac("86213a0f50bce10e".to_string()),
         region: Region::Us915,
         tx: GatewayTx(gw),
     };
 
     // Gateway connect
     tx.gateway_connect(gateway.clone()).await;
-    tx.gateway_disconnect(gateway.b58).await;
+    tx.gateway_disconnect(gateway).await;
     assert_eq!(0, app.gateway_count());
 
     match gwmp::app::handle_single_message(&mut app).await {
@@ -219,9 +220,9 @@ async fn send_downlink_to_known_gateway() -> Result {
         .expect("result parseable")
         .expect("option contains downlink");
 
-    let gw = GatewayID {
+    let gw = Gateway {
         b58: downlink.gateway_b58.clone(),
-        mac: "mac".to_string(),
+        mac: downlink.gateway_b58.clone().into(),
         region: Region::Us915,
         tx: GatewayTx(gw_tx),
     };
@@ -333,7 +334,7 @@ fn default_gwmp_settings() -> GwmpSettings {
 }
 
 fn join_accept_payload() -> serde_json::Value {
-    let token = make_join_token("test-gateway".to_string(), 100, Region::Us915);
+    let token = make_join_token(GatewayB58("test-gateway".to_string()), 100, Region::Us915);
     serde_json::json!({
         "ProtocolVersion": "1.1",
         "SenderID": "000024",

@@ -1,23 +1,20 @@
 use super::{packet::to_packet_down, settings::GwmpSettings, Msg, MsgReceiver, MsgSender};
 use crate::{
     uplink::{
-        ingest::{GatewayID, GatewayTx},
         packet::{PacketUp, PacketUpTrait},
+        Gateway, GatewayMac, GatewayTx,
     },
     Result,
 };
-use semtech_udp::{
-    client_runtime::{self, ClientTx, DownlinkRequest, Event, UdpRuntime},
-    MacAddress,
-};
-use std::{collections::HashMap, net::SocketAddr, str::FromStr};
+use semtech_udp::client_runtime::{self, ClientTx, DownlinkRequest, Event, UdpRuntime};
+use std::{collections::HashMap, net::SocketAddr};
 use tokio::sync::mpsc::Receiver;
 
 pub struct App {
     pub settings: GwmpSettings,
     message_tx: MsgSender,
     message_rx: MsgReceiver,
-    forward_chans: HashMap<String, (ClientTx, GatewayTx, triggered::Trigger)>,
+    forward_chans: HashMap<GatewayMac, (ClientTx, GatewayTx, triggered::Trigger)>,
 }
 
 impl App {
@@ -35,10 +32,8 @@ impl App {
     }
 }
 
-pub type GatewayMac = String;
-
 pub struct Client {
-    pub gateway_mac: GatewayMac,
+    pub mac: GatewayMac,
     pub udp_runtime: UdpRuntime,
     pub shutdown_listener: triggered::Listener,
     pub downlink_receiver: Receiver<Event>,
@@ -74,7 +69,7 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
         Msg::GatewayConnect(gw) => {
             let (uplink_forwarder, downlink_receiver, udp_runtime) =
                 client_runtime::UdpRuntime::new(
-                    MacAddress::from_str(&gw.mac).expect("mac address from gateway"),
+                    gw.mac.clone().into(),
                     endpoint_for_gateway(app, &gw),
                 )
                 .await
@@ -82,30 +77,33 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
 
             let (shutdown_trigger, shutdown_listener) = triggered::trigger();
             app.forward_chans
-                .insert(gw.b58, (uplink_forwarder, gw.tx, shutdown_trigger));
+                .insert(gw.mac.clone(), (uplink_forwarder, gw.tx, shutdown_trigger));
 
             return UpdateAction::NewClient(Client {
-                gateway_mac: gw.mac,
+                mac: gw.mac,
                 udp_runtime,
                 shutdown_listener,
                 downlink_receiver,
             });
         }
-        Msg::GatewayDisconnect(gw_b58) => {
-            tracing::info!(gw_b58, "gateway disconnected");
-            match app.forward_chans.get(&gw_b58) {
+        Msg::GatewayDisconnect(gw_mac) => {
+            tracing::info!(?gw_mac, "gateway disconnected");
+            match app.forward_chans.get(&gw_mac) {
                 Some((_, _, shutdown)) => shutdown.trigger(),
                 None => {
-                    tracing::warn!(gw_b58, "something went wrong, gateway already disconnected");
+                    tracing::warn!(
+                        ?gw_mac,
+                        "something went wrong, gateway already disconnected"
+                    );
                 }
             }
-            app.forward_chans.remove(&gw_b58);
+            app.forward_chans.remove(&gw_mac);
         }
         Msg::Uplink(packet_up) => {
-            let gateway_mac = packet_up.gateway_mac_str();
-            match app.forward_chans.get(&gateway_mac) {
+            let gw_mac = packet_up.gateway_mac();
+            match app.forward_chans.get(&gw_mac) {
                 Some((chan, _, _)) => {
-                    tracing::info!(gateway_mac, "uplink");
+                    tracing::info!(?gw_mac, "uplink");
                     return UpdateAction::Uplink(chan.clone(), packet_up);
                 }
                 None => todo!(),
@@ -144,10 +142,8 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
                             todo!("udp connection lost")
                         }
                         client_runtime::Event::DownlinkRequest(downlink) => {
-                            tracing::info!(client.gateway_mac, "sending downlink");
-                            message_tx
-                                .send_downlink(client.gateway_mac.to_string(), downlink)
-                                .await
+                            tracing::info!(?client.mac, "sending downlink");
+                            message_tx.send_downlink(client.mac.clone(), downlink).await
                         }
                         client_runtime::Event::UnableToParseUdpFrame(_, _) => {
                             todo!("unable to parse udp frame")
@@ -159,16 +155,10 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
     }
 }
 
-fn endpoint_for_gateway(app: &App, gw: &GatewayID) -> SocketAddr {
+fn endpoint_for_gateway(app: &App, gw: &Gateway) -> SocketAddr {
     let mut endpoint = app.settings.lns_endpoint.clone();
     if let Some(&port) = app.settings.region_port_mapping.get(&gw.region) {
         endpoint.set_port(port);
     }
     endpoint
-}
-
-impl Into<MacAddress> for GatewayID {
-    fn into(self) -> MacAddress {
-        MacAddress::from_str(&self.mac).expect("mac address from gateway")
-    }
 }

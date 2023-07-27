@@ -31,8 +31,7 @@ pub fn to_packet_down(value: &semtech_udp::pull_resp::TxPk) -> PacketRouterPacke
 
 impl From<PacketUp> for push_data::Packet {
     fn from(value: PacketUp) -> Self {
-        let gateway_mac =
-            MacAddress::from_str(&value.gateway_mac_str()).expect("mac address from b58");
+        let gateway_mac: MacAddress = value.gateway_mac().into();
         let freq = value.frequency_mhz();
         let packet = value.packet;
         let datarate =

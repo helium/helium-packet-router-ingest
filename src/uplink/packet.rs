@@ -1,15 +1,9 @@
+use super::{DevAddr, Eui, GatewayB58, GatewayMac, PacketHash};
 use crate::region;
-use helium_crypto::PublicKeyBinary;
 use helium_proto::services::router::PacketRouterPacketUpV1;
 use helium_proto::Region;
 use lorawan::parser::EUI64;
 use lorawan::parser::{DataHeader, PhyPayload};
-
-#[derive(Debug, PartialEq, Eq, Hash, Clone)]
-pub struct PacketHash(pub String);
-pub type Eui = String;
-pub type DevAddr = String;
-pub type GatewayB58 = String;
 
 #[derive(Debug, Clone)]
 pub struct PacketUp {
@@ -45,7 +39,7 @@ pub trait PacketUpTrait {
     fn gateway_b58(&self) -> GatewayB58;
     fn hash(&self) -> PacketHash;
     fn routing_info(&self) -> RoutingInfo;
-    fn gateway_mac_str(&self) -> String;
+    fn gateway_mac(&self) -> GatewayMac;
     fn rssi(&self) -> i32;
     fn snr(&self) -> f32;
     fn region(&self) -> Region;
@@ -66,30 +60,24 @@ pub fn hz_to_mhz(hz: u32) -> f64 {
 impl RoutingInfo {
     pub fn eui(app: EUI64<&[u8]>, dev: EUI64<&[u8]>) -> Self {
         Self::Eui {
-            app: EUI64::new(Self::reversed(app.as_ref()))
-                .unwrap()
-                .to_string(),
-            dev: EUI64::new(Self::reversed(dev.as_ref()))
-                .unwrap()
-                .to_string(),
+            app: app.into(),
+            dev: dev.into(),
         }
     }
-    pub fn devaddr(devaddr: DevAddr) -> Self {
-        Self::DevAddr(devaddr)
-    }
-
-    fn reversed(slice: &[u8]) -> Vec<u8> {
-        let mut flipped = Vec::with_capacity(slice.len());
-        for &byte in slice.iter().rev() {
-            flipped.push(byte);
-        }
-        flipped
+    pub fn devaddr(devaddr: lorawan::parser::DevAddr<&[u8]>) -> Self {
+        Self::DevAddr(devaddr.into())
     }
 }
 
 impl PacketUpTrait for PacketUp {
     fn gateway_b58(&self) -> GatewayB58 {
-        PublicKeyBinary::from(&self.packet.gateway[..]).to_string()
+        let gw = &self.packet.gateway;
+        gw.into()
+    }
+
+    fn gateway_mac(&self) -> GatewayMac {
+        let gw = &self.packet.gateway;
+        gw.into()
     }
 
     fn hash(&self) -> PacketHash {
@@ -109,18 +97,12 @@ impl PacketUpTrait for PacketUp {
             }
             PhyPayload::Data(payload) => match payload {
                 lorawan::parser::DataPayload::Encrypted(phy) => {
-                    let devaddr = phy.fhdr().dev_addr().to_string();
+                    let devaddr = phy.fhdr().dev_addr();
                     RoutingInfo::devaddr(devaddr)
                 }
                 lorawan::parser::DataPayload::Decrypted(_) => RoutingInfo::Unknown,
             },
         }
-    }
-
-    fn gateway_mac_str(&self) -> String {
-        let hash = xxhash_rust::xxh64::xxh64(&self.packet.gateway[1..], 0);
-        let hash = hash.to_be_bytes();
-        hex::encode(hash)
     }
 
     fn region(&self) -> Region {
@@ -163,17 +145,11 @@ impl PacketUpTrait for PacketUp {
     }
 }
 
-impl From<&str> for PacketHash {
-    fn from(value: &str) -> Self {
-        Self(value.to_string())
-    }
-}
-
 #[cfg(test)]
 mod test {
     use lorawan::parser::PhyPayload;
 
-    use crate::uplink::packet::RoutingInfo;
+    use crate::uplink::{packet::RoutingInfo, Eui};
 
     #[test]
     fn eui_parse() {
@@ -184,8 +160,8 @@ mod test {
         if let PhyPayload::JoinRequest(request) = lorawan::parser::parse(bytes).unwrap() {
             assert_eq!(
                 RoutingInfo::Eui {
-                    app: "0000000000000000".to_string(),
-                    dev: "0000000000000003".to_string()
+                    app: Eui("0000000000000000".to_string()),
+                    dev: Eui("0000000000000003".to_string())
                 },
                 RoutingInfo::eui(request.app_eui(), request.dev_eui())
             );

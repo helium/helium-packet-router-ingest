@@ -5,7 +5,7 @@ use super::{
 use crate::{
     http_roaming::{PRStartAns, PRStartAnsPlain, XmitDataReq},
     region::downlink_datarate,
-    uplink::packet::GatewayB58,
+    uplink::GatewayB58,
     Result,
 };
 use helium_proto::services::router::{PacketRouterPacketDownV1, WindowV1};
@@ -219,6 +219,7 @@ mod test {
             PRStartAns,
         },
         region::{downlink_datarate, Region},
+        uplink::GatewayB58,
         Result,
     };
     use duration_string::DurationString;
@@ -244,7 +245,7 @@ mod test {
     }
 
     fn join_accept_payload() -> serde_json::Value {
-        let token = make_join_token("test-gateway".to_string(), 100, Region::Us915);
+        let token = make_join_token(GatewayB58("test-gateway".to_string()), 100, Region::Us915);
         serde_json::json!({
             "ProtocolVersion": "1.1",
             "SenderID": "000024",
@@ -282,7 +283,7 @@ mod test {
     }
 
     fn unconfirmed_downlink_payload() -> serde_json::Value {
-        let token = make_data_token("test-gateway".to_string(), 100, Region::Us915);
+        let token = make_data_token(GatewayB58("test-gateway".to_string()), 100, Region::Us915);
         serde_json::json!({
             "ProtocolVersion":"1.1",
             "SenderID":"000024",
@@ -386,7 +387,7 @@ mod test {
 
     #[test]
     fn join_accept_rx1_only() {
-        let token = make_join_token("test-gateway".to_string(), 100, Region::Eu868);
+        let token = make_join_token(GatewayB58("test-gateway".to_string()), 100, Region::Eu868);
         let value = serde_json::json!({"ProtocolVersion":"1.1","SenderNSID":"f03d290000000101","ReceiverNSID":"6081fffe12345678","SenderID":"600013","ReceiverID":"c00053","TransactionID":1152841626,"MessageType":"PRStartAns","Result":{"ResultCode":"Success"},"Lifetime":0,"DevEUI":"0018b20000002487","SenderToken":"0108f03d290000000101","PHYPayload":"202cf4a93d978c060233bbaa88d20f48673136ea147f5ad92e8b015a581a8d74cc","DLMetaData":{"DevEUI":"0018b20000002487","RXDelay1":5,"DLFreq1":869.525,"DataRate1":0,"FNSULToken":token,"ClassMode":"A","HiPriorityFlag":false}});
         let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("not a downlink") };
         assert_eq!(
@@ -409,7 +410,7 @@ mod test {
 
     #[test]
     fn join_accept_rx2_only() {
-        let token = make_join_token("test-gateway".to_string(), 100, Region::Eu868);
+        let token = make_join_token(GatewayB58("test-gateway".to_string()), 100, Region::Eu868);
         let value = serde_json::json!({"ProtocolVersion":"1.1","SenderNSID":"f03d290000000101","ReceiverNSID":"6081fffe12345678","SenderID":"600013","ReceiverID":"c00053","TransactionID":1152841626,"MessageType":"PRStartAns","Result":{"ResultCode":"Success"},"Lifetime":0,"DevEUI":"0018b20000002487","SenderToken":"0108f03d290000000101","PHYPayload":"202cf4a93d978c060233bbaa88d20f48673136ea147f5ad92e8b015a581a8d74cc","DLMetaData":{"DevEUI":"0018b20000002487","RXDelay1":5,"DLFreq2":869.525,"DataRate2":0,"FNSULToken":token,"ClassMode":"A","HiPriorityFlag":false}});
         let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("not a downlink") };
         assert_eq!(
@@ -460,7 +461,7 @@ mod test {
 
     #[test]
     fn xmit_rx1_only() {
-        let token = make_data_token("test-gateway".to_string(), 100, Region::Us915);
+        let token = make_data_token(GatewayB58("test-gateway".to_string()), 100, Region::Us915);
         let value = serde_json::json!({ "ProtocolVersion":"1.1", "SenderID":"000024", "ReceiverID":"c00053", "TransactionID":274631693, "MessageType":"XmitDataReq", "PHYPayload":"6073000048ab00000300020070030000ff01063d32ce60", "ULMetaData":null, "DLMetaData":{ "DevEUI":"0000000000000003", "FPort":null, "FCntDown":null, "Confirmed":false, "DLFreq1":926.9, "RXDelay1":1, "ClassMode":"A", "DataRate1":10, "FNSULToken":token, "GWInfo":[{ "FineRecvTime":null, "RSSI":null, "SNR":null, "Lat":null, "Lon":null, "DLAllowed":null }], "HiPriorityFlag":false} } );
         let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
 
@@ -484,7 +485,7 @@ mod test {
 
     #[test]
     fn xmit_x2_only() {
-        let token = make_data_token("test-gateway".to_string(), 100, Region::Us915);
+        let token = make_data_token(GatewayB58("test-gateway".to_string()), 100, Region::Us915);
         let value = serde_json::json!({ "ProtocolVersion":"1.1", "SenderID":"000024", "ReceiverID":"c00053", "TransactionID":274631693, "MessageType":"XmitDataReq", "PHYPayload":"6073000048ab00000300020070030000ff01063d32ce60", "ULMetaData":null, "DLMetaData":{ "DevEUI":"0000000000000003", "FPort":null, "FCntDown":null, "Confirmed":false, "DLFreq2":923.3, "RXDelay1":1, "ClassMode":"A", "DataRate2":8, "FNSULToken":token, "GWInfo":[{ "FineRecvTime":null, "RSSI":null, "SNR":null, "Lat":null, "Lon":null, "DLAllowed":null }], "HiPriorityFlag":false} } );
         let Some(packet_down) = parse_http_payload(value).expect("parseable") else { panic!("Not a downlink") };
 
@@ -508,7 +509,7 @@ mod test {
 
     #[test]
     fn xmit_class_c() {
-        let token = make_data_token("test-gateway".to_string(), 100, Region::Us915);
+        let token = make_data_token(GatewayB58("test-gateway".to_string()), 100, Region::Us915);
         let value = serde_json::json!({
             "ProtocolVersion":"1.1",
             "SenderID":"000024",
