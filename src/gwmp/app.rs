@@ -4,7 +4,7 @@ use crate::{
     Result,
 };
 use semtech_udp::client_runtime::{self, ClientTx, DownlinkRequest, Event, UdpRuntime};
-use std::{collections::HashMap, net::SocketAddr};
+use std::{collections::HashMap, fmt::Debug, net::SocketAddr};
 use tokio::sync::mpsc::Receiver;
 
 pub struct App {
@@ -36,7 +36,13 @@ pub struct Client {
     pub downlink_receiver: Receiver<Event>,
 }
 
-#[derive()]
+impl Debug for Client {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Client").field("mac", &self.mac).finish()
+    }
+}
+
+#[derive(Debug)]
 pub enum UpdateAction {
     Noop,
     NewClient(Client),

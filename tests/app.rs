@@ -106,14 +106,14 @@ async fn gwmp_gateway_connect_disconnect() -> Result {
     assert_eq!(0, app.gateway_count());
 
     match gwmp::app::handle_single_message(&mut app).await {
-        GwmpUpdateAction::Noop => (),
-        _ => anyhow::bail!("expected no action from gateway connect"),
+        GwmpUpdateAction::NewClient(_) => (),
+        action => anyhow::bail!("expected new client from gateway connect got: {action:?}"),
     }
     assert_eq!(1, app.gateway_count());
 
     match gwmp::app::handle_single_message(&mut app).await {
         GwmpUpdateAction::Noop => (),
-        _ => anyhow::bail!("expected no action from gateway disconnect"),
+        action => anyhow::bail!("expected no action from gateway disconnect got: {action:?}"),
     }
     assert_eq!(0, app.gateway_count());
 
@@ -330,7 +330,11 @@ fn default_gwmp_settings() -> GwmpSettings {
 }
 
 fn join_accept_payload() -> serde_json::Value {
-    let token = make_join_token(GatewayB58("test-gateway".to_string()), 100, Region::Us915);
+    let token = make_join_token(
+        GatewayB58("13jnwnZYLDgw9Kd4zp33cyx4tBNQJ4jMoNvHTiFyvUkAgkhQUz9".to_string()),
+        100,
+        Region::Us915,
+    );
     serde_json::json!({
         "ProtocolVersion": "1.1",
         "SenderID": "000024",
