@@ -25,7 +25,7 @@ async fn gwmp_gateway_connect_disconnect() -> Result {
     assert_eq!(0, app.gateway_count());
 
     match gwmp::app::handle_single_message(&mut app).await {
-        UpdateAction::NewClient(_) => (),
+        UpdateAction::NewForwarder { .. } => (),
         action => anyhow::bail!("expected new client from gateway connect got: {action:?}"),
     }
     assert_eq!(1, app.gateway_count());
