@@ -44,9 +44,9 @@ async fn main() {
 pub async fn run_http(settings: HttpSettings) {
     let protocol_version = &settings.roaming.protocol_version;
     let metrics_listen_addr = settings.metrics_listen;
-    let http_listen_addr = settings.network.downlink_listen;
-    let grpc_listen_addr = settings.network.uplink_listen;
-    let outgoing_addr = settings.network.lns_endpoint.clone();
+    let http_listen_addr = settings.downlink_listen;
+    let grpc_listen_addr = settings.uplink_listen;
+    let outgoing_addr = settings.lns_endpoint.clone();
     let dedup_window = settings.roaming.dedup_window;
 
     tracing::info!("=====================================");

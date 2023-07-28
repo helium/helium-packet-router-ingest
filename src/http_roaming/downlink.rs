@@ -83,8 +83,8 @@ impl ToPacketDown for PRStartAns {
     fn http_body(&self, settings: &RoamingSettings) -> HttpResponse {
         HttpResponse {
             protocol_version: "1.1".to_string(),
-            sender_id: settings.helium_net_id.clone(),
-            receiver_id: settings.target_net_id.clone(),
+            sender_id: settings.sender_net_id.clone(),
+            receiver_id: settings.receiver_net_id.clone(),
             transaction_id: self.transaction_id,
             message_type: HttpResponseMessageType::PRStartNotif,
             sender_nsid: settings.sender_nsid.clone(),
@@ -126,8 +126,8 @@ impl ToPacketDown for XmitDataReq {
     fn http_body(&self, settings: &RoamingSettings) -> HttpResponse {
         HttpResponse {
             protocol_version: "1.1".to_string(),
-            sender_id: settings.helium_net_id.clone(),
-            receiver_id: settings.target_net_id.clone(),
+            sender_id: settings.sender_net_id.clone(),
+            receiver_id: settings.receiver_net_id.clone(),
             transaction_id: self.transaction_id,
             message_type: HttpResponseMessageType::XmitDataAns,
             sender_nsid: settings.sender_nsid.clone(),
@@ -230,8 +230,8 @@ mod test {
         fn default() -> Self {
             Self {
                 protocol_version: Default::default(),
-                helium_net_id: Default::default(),
-                target_net_id: Default::default(),
+                sender_net_id: Default::default(),
+                receiver_net_id: Default::default(),
                 sender_nsid: Default::default(),
                 receiver_nsid: Default::default(),
                 dedup_window: DurationString::new(Duration::from_millis(1250)),

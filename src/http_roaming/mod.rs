@@ -140,8 +140,8 @@ pub fn make_pr_start_req(packets: &[PacketUp], config: &RoamingSettings) -> Resu
         sender_nsid: config.sender_nsid.to_owned(),
         receiver_nsid: config.receiver_nsid.to_owned(),
         dedup_window_size: config.dedup_window.to_string(),
-        sender_id: config.helium_net_id.to_owned(),
-        receiver_id: config.target_net_id.to_owned(),
+        sender_id: config.sender_net_id.to_owned(),
+        receiver_id: config.receiver_net_id.to_owned(),
         phy_payload: packet.json_payload(),
         ul_meta_data: ULMetaData {
             devaddr,

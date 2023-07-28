@@ -43,8 +43,8 @@ mod tests {
         regions.insert(Region::Us915, 1700);
         regions.insert(Region::Au915, 1701);
         regions.insert(Region::As9231, 1702);
-        let a = Testing { regions };
+        let _a = Testing { regions };
 
-        println!("{}", toml::to_string(&a).unwrap());
+        // println!("{}", toml::to_string(&_a).unwrap());
     }
 }

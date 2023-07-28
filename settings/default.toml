@@ -7,15 +7,22 @@ cleanup_window = "30s"
 # Listen address for metrics requests.
 metrics_listen = "0.0.0.0:9002"
 
+## GRPC Uplink messages from Helium Packet Router.
+uplink_listen = "0.0.0.0:9000"
+
+## Endpoint of LNS for all roaming messages.
+lns_endpoint = "http://localhost:9005"
+
+## HTTP Roaming specific settings
 [roaming]
 ## Roaming Protocol Version
 protocol_version = "1.1"
 
 ## Main Helium NetID.
-helium_net_id = "C00053"
+sender_net_id = "C00053"
 
 ## NetID of the target network.
-target_net_id = "000000"
+receiver_net_id = "000000"
 
 ## The unique identity of this fNS
 sender_nsid = "6081FFFE12345678"
@@ -29,12 +36,10 @@ dedup_window = "250ms"
 ## Not all LNSs handle a PRStartNotif message after a JoinAccept has been sent.
 send_pr_start_notif = false
 
-[network]
-## Endpoint of LNS for all roaming messages.
-lns_endpoint = "http://localhost:9005"
-
 ## HTTP Downlink messages from LNS.
 downlink_listen = "0.0.0.0:9001"
 
-## GRPC Uplink messages from Helium Packet Router.
-uplink_listen = "0.0.0.0:9000"
+## GWMP Specific settings
+[region_port_mapping]
+## Us915 = 1700
+## Au915 = 1701

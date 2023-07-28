@@ -170,7 +170,7 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
             tracing::info!(?packet_down.gateway_b58, "downlink sent");
 
             if http_response.should_send_for_protocol(&app.settings.roaming.protocol_version) {
-                let lns_endpoint = app.settings.network.lns_endpoint.clone();
+                let lns_endpoint = app.settings.lns_endpoint.clone();
                 let client = app.client.clone();
                 tokio::spawn(async move {
                     let body = serde_json::to_string(&http_response).unwrap();
@@ -180,7 +180,7 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
             }
         }
         UpdateAction::DownlinkError(http_response) => {
-            let lns_endpoint = app.settings.network.lns_endpoint.clone();
+            let lns_endpoint = app.settings.lns_endpoint.clone();
             let client = app.client.clone();
             tokio::spawn(async move {
                 let body = serde_json::to_string(&http_response).unwrap();
@@ -189,7 +189,7 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
             });
         }
         UpdateAction::UplinkSend(pr_start_req) => {
-            let lns_endpoint = app.settings.network.lns_endpoint.clone();
+            let lns_endpoint = app.settings.lns_endpoint.clone();
             let client = app.client.clone();
             tokio::spawn(async move {
                 let body = serde_json::to_string(&pr_start_req).unwrap();

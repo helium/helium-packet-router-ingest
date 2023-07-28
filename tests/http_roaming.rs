@@ -4,7 +4,7 @@ use hpr_http_rs::{
     http_roaming::{
         app::{self, UpdateAction},
         downlink::parse_http_payload,
-        settings::{HttpSettings, NetworkSettings, ProtocolVersion, RoamingSettings},
+        settings::{HttpSettings, ProtocolVersion, RoamingSettings},
         ul_token::make_join_token,
         HttpResponseResult, MsgSender,
     },
@@ -251,20 +251,18 @@ fn default_http_roaming_settings() -> HttpSettings {
     HttpSettings {
         roaming: RoamingSettings {
             protocol_version: ProtocolVersion::default(),
-            helium_net_id: "C00053".to_string(),
-            target_net_id: "000024".to_string(),
+            sender_net_id: "C00053".to_string(),
+            receiver_net_id: "000024".to_string(),
             sender_nsid: "sender-nsid".to_string(),
             receiver_nsid: "receiver-nsid".to_string(),
             dedup_window: DurationString::from_string("250ms".to_string()).unwrap(),
             authorization_header: Some("Auth header".to_string()),
         },
-        network: NetworkSettings {
-            lns_endpoint: "localhost:8080".to_string(),
-            downlink_listen: "0.0.0.0:9000".parse().unwrap(),
-            uplink_listen: "0.0.0.0:9001".parse().unwrap(),
-        },
         cleanup_window: DurationString::from_string("10s".to_string()).unwrap(),
         metrics_listen: "0.0.0.0:9002".parse().unwrap(),
+        lns_endpoint: "localhost:8080".to_string(),
+        downlink_listen: "0.0.0.0:9000".parse().unwrap(),
+        uplink_listen: "0.0.0.0:9001".parse().unwrap(),
     }
 }
 

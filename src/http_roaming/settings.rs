@@ -6,13 +6,16 @@ use duration_string::DurationString;
 pub struct HttpSettings {
     /// Roaming Settings.
     pub roaming: RoamingSettings,
-    /// Network Settings.
-    pub network: NetworkSettings,
-
     /// How long before Packets are cleaned out of being deduplicated in duration time.
     pub cleanup_window: DurationString,
     /// Listen address for Metrics endpoint.
     pub metrics_listen: SocketAddr,
+    /// LNS Endpoint
+    pub lns_endpoint: String,
+    /// Http Server for Downlinks
+    pub downlink_listen: SocketAddr,
+    /// Grpc Server for Uplinks
+    pub uplink_listen: SocketAddr,
 }
 
 #[derive(Debug, Clone, clap::Args, serde::Deserialize)]
@@ -26,9 +29,9 @@ pub struct RoamingSettings {
     pub protocol_version: ProtocolVersion,
     /// Helium forwarding NetID, for LNSs to identify which network to back through for downlinking.
     /// (default: C00053)
-    pub helium_net_id: String,
+    pub sender_net_id: String,
     /// NetID of the network operating the http forwarder
-    pub target_net_id: String,
+    pub receiver_net_id: String,
     /// Identity of the this NS, unique to HTTP forwarder
     pub sender_nsid: String,
     /// Identify of the receiving NS
@@ -50,16 +53,6 @@ impl Default for ProtocolVersion {
     fn default() -> Self {
         Self::V1_1
     }
-}
-
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct NetworkSettings {
-    /// LNS Endpoint
-    pub lns_endpoint: String,
-    /// Http Server for Downlinks
-    pub downlink_listen: SocketAddr,
-    /// Grpc Server for Uplinks
-    pub uplink_listen: SocketAddr,
 }
 
 impl FromStr for ProtocolVersion {
