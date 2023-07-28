@@ -8,11 +8,32 @@ use std::{collections::HashMap, fmt::Debug, net::SocketAddr};
 use tokio::sync::mpsc::Receiver;
 use tracing::Instrument;
 
+struct GwmpGateway {
+    client_tx: ClientTx,
+    gateway: Gateway,
+    shutdown_trigger: triggered::Trigger,
+}
+
+impl GwmpGateway {
+    fn new(client_tx: ClientTx, gateway: Gateway, shutdown_trigger: triggered::Trigger) -> Self {
+        Self {
+            client_tx,
+            gateway,
+            shutdown_trigger,
+        }
+    }
+    fn shutdown(&self) {
+        self.shutdown_trigger.trigger();
+    }
+}
+
+type GwmpGateways = HashMap<GatewayMac, GwmpGateway>;
+
 pub struct App {
     pub settings: GwmpSettings,
     message_tx: MsgSender,
     message_rx: MsgReceiver,
-    forward_chans: HashMap<GatewayMac, (ClientTx, Gateway, triggered::Trigger)>,
+    forward_chans: GwmpGateways,
 }
 
 impl App {
@@ -72,23 +93,23 @@ pub async fn handle_single_message(app: &mut App) -> UpdateAction {
 
 async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
     match msg {
-        Msg::GatewayConnect(gw) => {
+        Msg::GatewayConnect(gateway) => {
             let (uplink_forwarder, downlink_receiver, udp_runtime) =
                 client_runtime::UdpRuntime::new(
-                    gw.mac.clone().into(),
-                    endpoint_for_gateway(app, &gw),
+                    gateway.mac.clone().into(),
+                    endpoint_for_gateway_region(app, &gateway),
                 )
                 .await
                 .expect("create udp runtime");
 
             let (shutdown_trigger, shutdown_listener) = triggered::trigger();
             app.forward_chans.insert(
-                gw.mac.clone(),
-                (uplink_forwarder, gw.clone(), shutdown_trigger),
+                gateway.mac.clone(),
+                GwmpGateway::new(uplink_forwarder, gateway.clone(), shutdown_trigger),
             );
 
             return UpdateAction::NewClient(Client {
-                gateway: gw,
+                gateway,
                 udp_runtime,
                 shutdown_listener,
                 downlink_receiver,
@@ -96,37 +117,36 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
         }
         Msg::GatewayDisconnect(gw) => {
             tracing::info!(mac = ?gw.mac, "gateway disconnected");
-            match app.forward_chans.get(&gw.mac) {
-                Some((_, _, shutdown)) => shutdown.trigger(),
+            match app.forward_chans.remove(&gw.mac) {
+                Some(gwmp_gw) => gwmp_gw.shutdown(),
                 None => {
-                    tracing::warn!(?gw, "something went wrong, gateway already disconnected");
+                    tracing::warn!(
+                        ?gw.mac,
+                        "something went wrong, gateway already disconnected"
+                    );
                 }
             }
-            app.forward_chans.remove(&gw.mac);
         }
         Msg::Uplink(packet_up) => {
             let gw_mac = packet_up.gateway_mac();
             match app.forward_chans.get(&gw_mac) {
-                Some((chan, _, _)) => {
+                Some(gwmp_gw) => {
                     tracing::info!(?gw_mac, "uplink");
-                    return UpdateAction::Uplink(chan.clone(), packet_up);
+                    return UpdateAction::Uplink(gwmp_gw.client_tx.clone(), packet_up);
                 }
                 None => tracing::warn!(
                     mac = ?gw_mac,
                     b58 = ?packet_up.gateway_b58(),
-                    "something went wrong, packet received for unknown gateway"
+                    "packet received for unknown gateway"
                 ),
             }
         }
         Msg::Downlink(gateway, packet_down) => match app.forward_chans.get(&gateway.mac) {
-            Some((_, chan, _)) => {
+            Some(gwmp_gw) => {
                 tracing::info!(?gateway, "downlink");
-                return UpdateAction::Downlink(chan.clone(), packet_down);
+                return UpdateAction::Downlink(gwmp_gw.gateway.clone(), packet_down);
             }
-            None => tracing::warn!(
-                ?gateway,
-                "something went wrong, downlink received for unknown gateway"
-            ),
+            None => tracing::warn!(?gateway, "downlink received for unknown gateway"),
         },
     }
     UpdateAction::Noop
@@ -188,7 +208,7 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
     }
 }
 
-fn endpoint_for_gateway(app: &App, gw: &Gateway) -> SocketAddr {
+fn endpoint_for_gateway_region(app: &App, gw: &Gateway) -> SocketAddr {
     let mut endpoint = app.settings.lns_endpoint;
     if let Some(&port) = app.settings.region_port_mapping.get(&gw.region) {
         endpoint.set_port(port);
