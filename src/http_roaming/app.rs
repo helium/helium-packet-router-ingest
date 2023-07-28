@@ -5,13 +5,15 @@ use super::{
 };
 use crate::{
     http_roaming::{downlink::PacketDown, make_pr_start_req, HttpResponse, PRStartReq},
-    Result, uplink::{GatewayB58, GatewayTx, PacketHash},
+    uplink::{GatewayB58, GatewayTx, PacketHash},
+    Result,
 };
 use axum::http::HeaderMap;
 use reqwest::header;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware};
 use reqwest_tracing::TracingMiddleware;
 use std::collections::HashMap;
+use tracing::Instrument;
 
 pub struct App {
     deduplicator: Deduplicator,
@@ -151,13 +153,17 @@ pub async fn handle_update_action(app: &App, action: UpdateAction) {
             let dedup = app.settings.roaming.dedup_window.into();
             let cleanup = app.settings.cleanup_window.into();
             let sender = app.message_tx.clone();
-            tokio::spawn(async move {
-                use tokio::time::sleep;
-                sleep(dedup).await;
-                sender.uplink_send(hash.clone()).await;
-                sleep(cleanup).await;
-                sender.uplink_cleanup(hash).await;
-            });
+            let timer_span = tracing::info_span!("packet timers", ?hash, ?dedup, ?cleanup);
+            tokio::spawn(
+                async move {
+                    use tokio::time::sleep;
+                    sleep(dedup).await;
+                    sender.uplink_send(hash.clone()).await;
+                    sleep(cleanup).await;
+                    sender.uplink_cleanup(hash).await;
+                }
+                .instrument(timer_span),
+            );
         }
         UpdateAction::DownlinkSend(gw_tx, packet_down, http_response) => {
             gw_tx.send_downlink(packet_down.downlink).await;
