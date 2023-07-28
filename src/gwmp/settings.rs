@@ -9,9 +9,9 @@ pub struct GwmpSettings {
     /// Grpc Server for Uplinks
     pub uplink_listen: SocketAddr,
     /// Address to forward over UDP
-    /// If region does not contain specific port, this port will be used as default.
     pub lns_endpoint: SocketAddr,
-    /// Region Port mapping for gwmp
+    /// Region Port mapping for gwmp.
+    /// If a region is not present, the port specific in `lns_endpoint` will be used.
     pub region_port_mapping: HashMap<Region, u16>,
 }
 
