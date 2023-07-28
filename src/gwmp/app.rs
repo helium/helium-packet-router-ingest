@@ -94,22 +94,23 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
             let (shutdown_trigger, shutdown_listener) = triggered::trigger();
             app.add_gateway(gateway.clone(), uplink_forwarder, shutdown_trigger);
 
-            return UpdateAction::NewForwarder {
+            UpdateAction::NewForwarder {
                 gateway,
                 udp_runtime,
                 shutdown_listener,
                 downlink_receiver,
-            };
+            }
         }
         Msg::GatewayDisconnect(gw) => {
             tracing::info!(mac = ?gw.mac, "gateway disconnected");
             match app.forward_chans.remove(&gw.mac) {
-                Some(gwmp_gw) => gwmp_gw.shutdown_trigger.trigger(),
+                Some(gwmp_gw) => {
+                    gwmp_gw.shutdown_trigger.trigger();
+                    UpdateAction::Noop
+                }
                 None => {
-                    tracing::warn!(
-                        ?gw.mac,
-                        "something went wrong, gateway already disconnected"
-                    );
+                    tracing::warn!(?gw.mac,"gateway already disconnected");
+                    UpdateAction::Noop
                 }
             }
         }
@@ -118,21 +119,19 @@ async fn handle_message(app: &mut App, msg: Msg) -> UpdateAction {
             match app.forward_chans.get(&gw_mac) {
                 Some(gwmp_gw) => {
                     tracing::info!(?gw_mac, "uplink");
-                    return UpdateAction::Uplink(gwmp_gw.clone(), packet_up);
+                    UpdateAction::Uplink(gwmp_gw.clone(), packet_up)
                 }
-                None => tracing::warn!(
-                    mac = ?gw_mac,
-                    b58 = ?packet_up.gateway_b58(),
-                    "packet received for unknown gateway"
-                ),
+                None => {
+                    tracing::warn!(mac = ?gw_mac, b58 = ?packet_up.gateway_b58(), "packet received for unknown gateway");
+                    UpdateAction::Noop
+                }
             }
         }
         Msg::Downlink(gateway, packet_down) => {
             tracing::info!(?gateway, "downlink");
-            return UpdateAction::Downlink(gateway, packet_down);
+            UpdateAction::Downlink(gateway, packet_down)
         }
     }
-    UpdateAction::Noop
 }
 
 pub async fn handle_update_action(app: &App, action: UpdateAction) {
