@@ -1,14 +1,21 @@
 use std::{collections::HashMap, net::SocketAddr};
 
 use helium_proto::Region;
+use serde::{
+    de::{self, Visitor},
+    Deserializer,
+};
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct GwmpSettings {
     /// Listen address for Metrics endpoint.
+    #[serde(deserialize_with = "deserialize_socket_addr")]
     pub metrics_listen: SocketAddr,
     /// Grpc Server for Uplinks
+    #[serde(deserialize_with = "deserialize_socket_addr")]
     pub uplink_listen: SocketAddr,
     /// Address to forward over UDP
+    #[serde(deserialize_with = "deserialize_socket_addr")]
     pub lns_endpoint: SocketAddr,
     /// Region Port mapping for gwmp.
     /// If a region is not present, the port specific in `lns_endpoint` will be used.
@@ -24,6 +31,32 @@ impl Default for GwmpSettings {
             region_port_mapping: Default::default(),
         }
     }
+}
+
+fn deserialize_socket_addr<'de, D>(deserializer: D) -> Result<SocketAddr, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct SocketAddrVisitor;
+
+    impl<'de> Visitor<'de> for SocketAddrVisitor {
+        type Value = SocketAddr;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a valid socket address")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<SocketAddr, E>
+        where
+            E: de::Error,
+        {
+            value
+                .parse()
+                .map_err(|_err| de::Error::invalid_value(de::Unexpected::Str(value), &self))
+        }
+    }
+
+    deserializer.deserialize_str(SocketAddrVisitor)
 }
 
 #[cfg(test)]

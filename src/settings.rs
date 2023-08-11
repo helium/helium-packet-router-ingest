@@ -1,4 +1,5 @@
-use crate::{gwmp::settings::GwmpSettings, http_roaming::settings::HttpSettings};
+use crate::{gwmp::settings::GwmpSettings, http_roaming::settings::HttpSettings, Result};
+use anyhow::Context;
 use config::{Config, File};
 use std::path::PathBuf;
 
@@ -14,7 +15,7 @@ pub enum Protocol {
     Http,
 }
 
-pub fn protocol_from_path(path: &PathBuf) -> Protocol {
+pub fn protocol_from_path(path: &PathBuf) -> Result<Protocol> {
     let config = Config::builder()
         .add_source(File::with_name("./settings/default.toml").required(true))
         .add_source(File::with_name(path.to_str().expect("filename")));
@@ -22,12 +23,12 @@ pub fn protocol_from_path(path: &PathBuf) -> Protocol {
     let c: ProtocolSetting = config
         .build()
         .and_then(|config| config.try_deserialize())
-        .expect("config with protocol");
+        .context(format!("Determining protocol from {path:?}"))?;
 
-    c.protocol
+    Ok(c.protocol)
 }
 
-pub fn http_from_path(path: &PathBuf) -> HttpSettings {
+pub fn http_from_path(path: &PathBuf) -> Result<HttpSettings> {
     let config = Config::builder()
         .add_source(File::with_name("./settings/default.toml").required(true))
         .add_source(File::with_name(path.to_str().expect("filename")));
@@ -35,10 +36,10 @@ pub fn http_from_path(path: &PathBuf) -> HttpSettings {
     config
         .build()
         .and_then(|config| config.try_deserialize())
-        .expect("valid config file")
+        .context(format!("Reading HTTP Roaming settings from {path:?}"))
 }
 
-pub fn gwmp_from_path(path: &PathBuf) -> GwmpSettings {
+pub fn gwmp_from_path(path: &PathBuf) -> Result<GwmpSettings> {
     let config = Config::builder()
         .add_source(File::with_name("./settings/default.toml").required(true))
         .add_source(File::with_name(path.to_str().expect("filename")));
@@ -46,5 +47,5 @@ pub fn gwmp_from_path(path: &PathBuf) -> GwmpSettings {
     config
         .build()
         .and_then(|config| config.try_deserialize())
-        .expect("valid config file")
+        .context(format!("Reading GWMP settings from {path:?}"))
 }

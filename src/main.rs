@@ -3,7 +3,7 @@ use hpr_http_rs::{
     gwmp::{self, settings::GwmpSettings},
     http_roaming::{self, settings::HttpSettings},
     settings::{self, Protocol},
-    uplink,
+    uplink, Result,
 };
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{net::SocketAddr, path::PathBuf};
@@ -16,22 +16,23 @@ struct Cli {
 }
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result {
     tracing_subscriber::fmt().init();
 
     let cli = Cli::parse();
     tracing::debug!(?cli, "opts");
 
-    match settings::protocol_from_path(&cli.path) {
+    match settings::protocol_from_path(&cli.path)? {
         Protocol::Http => {
-            let settings = settings::http_from_path(&cli.path);
+            let settings = settings::http_from_path(&cli.path)?;
             run_http(settings).await
         }
         Protocol::Gwmp => {
-            let settings = settings::gwmp_from_path(&cli.path);
+            let settings = settings::gwmp_from_path(&cli.path)?;
             run_gwmp(settings).await
         }
     }
+    Ok(())
 }
 
 pub async fn run_http(settings: HttpSettings) {
