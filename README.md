@@ -7,15 +7,15 @@ Set the protocol of the route to `packet_router`, and point it to wherever this 
 All available settings are in [settings/default.toml](settings/default.toml).
 Override the settings you need to change, and that will be applied on top of `settings/defualt.toml`.
 
-### HTTP
----
-```
-cargo run -- serve-http http_settings.toml
+### Running
+
+There is a sample docker-compose.yml.
+Or run directly. 
+
+``` sh
+cargo run settings.toml
 ```
 
+#### Protocol
 
-### GWMP 
----
-```
-cargo run -- serve-gwmp gwmp_settings.toml
-```
+The protocol is determined by settings `protocol` field in the `settings.toml` to `"gwmp" | "http"`.
