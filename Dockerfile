@@ -40,4 +40,4 @@ EXPOSE 9001
 EXPOSE 9002
 
 # Start the Rust program when the container is run
-CMD ["hpr-http-rs", "serve", "./settings.toml"]
+CMD ["hpr-http-rs", "./settings.toml"]

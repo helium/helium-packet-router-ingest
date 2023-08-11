@@ -2,7 +2,8 @@ use clap::Parser;
 use hpr_http_rs::{
     gwmp::{self, settings::GwmpSettings},
     http_roaming::{self, settings::HttpSettings},
-    settings, uplink,
+    settings::{self, Protocol},
+    uplink,
 };
 use metrics_exporter_prometheus::PrometheusBuilder;
 use std::{net::SocketAddr, path::PathBuf};
@@ -10,16 +11,8 @@ use tokio::spawn;
 
 #[derive(Debug, clap::Parser)]
 struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Debug, Clone, clap::Subcommand)]
-enum Commands {
-    /// Run the program with a toml settings file.
-    ServeHttp { path: Option<PathBuf> },
-    /// Run the program to forward traffic over UDP
-    ServeGwmp { path: Option<PathBuf> },
+    /// Path to settings.toml
+    path: PathBuf,
 }
 
 #[tokio::main]
@@ -29,13 +22,13 @@ async fn main() {
     let cli = Cli::parse();
     tracing::debug!(?cli, "opts");
 
-    match cli.command {
-        Commands::ServeHttp { path } => {
-            let settings = settings::http_from_path(path);
+    match settings::protocol_from_path(&cli.path) {
+        Protocol::Http => {
+            let settings = settings::http_from_path(&cli.path);
             run_http(settings).await
         }
-        Commands::ServeGwmp { path } => {
-            let settings = settings::gwmp_from_path(path);
+        Protocol::Gwmp => {
+            let settings = settings::gwmp_from_path(&cli.path);
             run_gwmp(settings).await
         }
     }
@@ -49,7 +42,7 @@ pub async fn run_http(settings: HttpSettings) {
     let outgoing_addr = settings.lns_endpoint.clone();
     let dedup_window = settings.roaming.dedup_window;
 
-    tracing::info!("=====================================");
+    tracing::info!("=== HTTP =============================");
     tracing::info!("protocol        :: {protocol_version:?}");
     tracing::info!("metrics listen  :: {metrics_listen_addr}");
     tracing::info!("uplink listen   :: {grpc_listen_addr}");
@@ -81,7 +74,7 @@ pub async fn run_gwmp(settings: GwmpSettings) {
     let metrics_listen_addr = settings.metrics_listen;
     let grpc_listen_addr = settings.uplink_listen;
 
-    tracing::info!("=====================================");
+    tracing::info!("=== GWMP ============================");
     tracing::info!("metrics listen  :: {metrics_listen_addr}");
     tracing::info!("uplink listen   :: {grpc_listen_addr}");
     tracing::info!("Region mappings ::");
