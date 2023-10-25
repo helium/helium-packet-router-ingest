@@ -16,7 +16,7 @@ pub trait UplinkIngest: Send + Sync {
     async fn gateway_disconnect(&self, gateway: Gateway);
 }
 
-pub async fn start<S: UplinkIngest + Clone>(sender: S, addr: SocketAddr) -> Result {
+pub async fn start<S: UplinkIngest + Clone + 'static>(sender: S, addr: SocketAddr) -> Result {
     tonic::transport::Server::builder()
         .add_service(PacketServer::new(Gateways::new(sender)))
         .serve(addr)
