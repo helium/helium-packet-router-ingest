@@ -149,7 +149,7 @@ mod test {
                 RoutingInfo::eui(request.app_eui(), request.dev_eui())
             );
         } else {
-            assert!(false);
+            unreachable!()
         }
     }
 
